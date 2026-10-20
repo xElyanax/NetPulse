@@ -1,0 +1,12 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Build Artifacts
+NetPulse.app/
+NetPulse.zip
+NetPulse_arm64
+NetPulse_x86_64
+*.o
+*.swp
