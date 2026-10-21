@@ -6,25 +6,44 @@ import AppKit
 
 // MARK: - Data Models
 
-struct AppUsageItem: Identifiable {
-    let id: String
+enum AppSortMode: String, CaseIterable, Identifiable {
+    case total = "Total Today"
+    case liveSpeed = "Live Speed"
+    var id: String { rawValue }
+}
+
+struct AppUsageItem: Identifiable, Codable, Equatable {
+    var id: String { name }
     let name: String
-    let pid: Int32
-    let rxBytes: UInt64
-    let txBytes: UInt64
+    var rxBytes: UInt64
+    var txBytes: UInt64
+    var currentRxSpeed: UInt64 = 0
+    var currentTxSpeed: UInt64 = 0
     var totalBytes: UInt64 { rxBytes + txBytes }
+    var currentSpeed: UInt64 { currentRxSpeed + currentTxSpeed }
 
     var iconName: String {
         let lower = name.lowercased()
         if lower.contains("safari") { return "safari.fill" }
-        if lower.contains("chrome") || lower.contains("firefox") || lower.contains("edge") { return "globe" }
-        if lower.contains("telegram") || lower.contains("whatsapp") || lower.contains("signal") { return "paperplane.fill" }
-        if lower.contains("code") || lower.contains("xcode") || lower.contains("terminal") || lower.contains("zsh") { return "terminal.fill" }
+        if lower.contains("chrome") { return "globe" }
+        if lower.contains("firefox") { return "flame.fill" }
+        if lower.contains("edge") { return "network" }
+        if lower.contains("arc") || lower.contains("brave") { return "globe.americas.fill" }
+        if lower.contains("telegram") { return "paperplane.fill" }
+        if lower.contains("whatsapp") { return "phone.fill" }
+        if lower.contains("signal") { return "lock.message.fill" }
+        if lower.contains("discord") { return "bubble.left.and.bubble.right.fill" }
+        if lower.contains("slack") { return "number" }
         if lower.contains("spotify") || lower.contains("music") { return "music.note" }
-        if lower.contains("mail") { return "envelope.fill" }
-        if lower.contains("slack") || lower.contains("discord") { return "bubble.left.and.bubble.right.fill" }
-        if lower.contains("cloud") || lower.contains("drive") || lower.contains("dropbox") { return "icloud.fill" }
-        if lower.contains("git") { return "arrow.triangle.branch" }
+        if lower.contains("vs code") || lower.contains("code") || lower.contains("cursor") { return "chevron.left.forwardslash.chevron.right" }
+        if lower.contains("xcode") { return "hammer.fill" }
+        if lower.contains("antigravity") { return "cpu.fill" }
+        if lower.contains("terminal") { return "terminal.fill" }
+        if lower.contains("vpn") || lower.contains("tunnel") { return "lock.shield.fill" }
+        if lower.contains("system") { return "apple.logo" }
+        if lower.contains("zoom") { return "video.fill" }
+        if lower.contains("cloud") || lower.contains("dropbox") || lower.contains("onedrive") { return "icloud.fill" }
+        if lower.contains("adobe") { return "paintbrush.fill" }
         return "app.dashed"
     }
 
@@ -32,10 +51,21 @@ struct AppUsageItem: Identifiable {
         let lower = name.lowercased()
         if lower.contains("safari") { return .blue }
         if lower.contains("chrome") { return .red }
+        if lower.contains("firefox") { return .orange }
+        if lower.contains("edge") { return .teal }
         if lower.contains("telegram") { return .cyan }
-        if lower.contains("code") || lower.contains("terminal") { return .green }
+        if lower.contains("whatsapp") { return .green }
+        if lower.contains("discord") { return .indigo }
+        if lower.contains("slack") { return .purple }
         if lower.contains("spotify") { return .green }
-        if lower.contains("mail") { return .indigo }
+        if lower.contains("music") { return .pink }
+        if lower.contains("vs code") { return .blue }
+        if lower.contains("xcode") { return .blue }
+        if lower.contains("antigravity") { return .purple }
+        if lower.contains("terminal") { return .green }
+        if lower.contains("vpn") { return .mint }
+        if lower.contains("system") { return .gray }
+        if lower.contains("zoom") { return .blue }
         return .accentColor
     }
 }
@@ -51,6 +81,7 @@ struct DayRecord: Codable {
     var internet: ByteCounters
     var vpn: ByteCounters
     var hourly: [String: ByteCounters]     // keys: "00", "01", ... "23"
+    var appUsage: [String: ByteCounters]?  // "Google Chrome": { rx, tx }
 }
 
 struct TrafficDatabase: Codable {
@@ -141,6 +172,9 @@ final class NetworkMonitor: ObservableObject {
         }
     }
     @Published var selectedFilter: ChartFilter = .all
+    @Published var appSortMode: AppSortMode = .total {
+        didSet { resortTopApps() }
+    }
 
     @Published var speedRX: UInt64 = 0
     @Published var speedTX: UInt64 = 0
@@ -161,7 +195,11 @@ final class NetworkMonitor: ObservableObject {
     @Published var summaryTotal: String = "0 B"
     @Published var summaryPeak: String = "0 B"
 
+    // Real App Traffic Records
     @Published var topApps: [AppUsageItem] = []
+    private var appCumulativeUsage: [String: ByteCounters] = [:]
+    private var appLiveSpeeds: [String: (rx: UInt64, tx: UInt64)] = [:]
+    private var previousNettopRaw: [String: (rx: UInt64, tx: UInt64)] = [:]
 
     private var database = TrafficDatabase(days: [:])
     private var previousSnapshot: [String: ByteCounters] = [:]
@@ -178,11 +216,13 @@ final class NetworkMonitor: ObservableObject {
         previousSnapshot = Self.captureSnapshot()
         refreshChartData()
 
+        // 1-second system interface tick
         timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
         }
 
-        processTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: true) { [weak self] _ in
+        // 2-second per-process nettop sampling
+        processTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             Task { await self?.updateProcessStats() }
         }
         Task { await updateProcessStats() }
@@ -259,7 +299,8 @@ final class NetworkMonitor: ObservableObject {
             dateKey: currentDayKey,
             internet: ByteCounters(),
             vpn: ByteCounters(),
-            hourly: [:]
+            hourly: [:],
+            appUsage: [:]
         )
         dayRecord.internet = todayInternet
         dayRecord.vpn = todayVPN
@@ -268,6 +309,7 @@ final class NetworkMonitor: ObservableObject {
         hourCounters.rx += deltaPhys.rx
         hourCounters.tx += deltaPhys.tx
         dayRecord.hourly[currentHourKey] = hourCounters
+        dayRecord.appUsage = appCumulativeUsage
         database.days[currentDayKey] = dayRecord
 
         tickCounter += 1
@@ -278,6 +320,204 @@ final class NetworkMonitor: ObservableObject {
         if selectedScope == .minute || selectedScope == .hourly {
             refreshChartData()
         }
+    }
+
+    // MARK: - Process Traffic Tracking Engine
+    private func updateProcessStats() async {
+        let rawSnapshot = await Task.detached(priority: .utility) {
+            return Self.runNettopSample()
+        }.value
+
+        guard !rawSnapshot.isEmpty else { return }
+
+        // If this is the very first sample and cumulative usage is empty, initialize baseline
+        if previousNettopRaw.isEmpty {
+            previousNettopRaw = rawSnapshot
+            if appCumulativeUsage.isEmpty {
+                for (proc, counts) in rawSnapshot {
+                    let cname = Self.cleanAppName(proc)
+                    var curr = appCumulativeUsage[cname] ?? ByteCounters()
+                    curr.rx += counts.rx
+                    curr.tx += counts.tx
+                    appCumulativeUsage[cname] = curr
+                }
+            }
+            resortTopApps()
+            return
+        }
+
+        // Calculate deltas across raw processes
+        var currentIntervalSpeeds: [String: (rx: UInt64, tx: UInt64)] = [:]
+
+        for (proc, currentCounts) in rawSnapshot {
+            let prevCounts = previousNettopRaw[proc] ?? (rx: 0, tx: 0)
+
+            // Delta computation: if connection reset or PID restarted, treat current as new delta
+            let drx = currentCounts.rx >= prevCounts.rx ? (currentCounts.rx - prevCounts.rx) : currentCounts.rx
+            let dtx = currentCounts.tx >= prevCounts.tx ? (currentCounts.tx - prevCounts.tx) : currentCounts.tx
+
+            if drx > 0 || dtx > 0 {
+                let cleanName = Self.cleanAppName(proc)
+                var cumulative = appCumulativeUsage[cleanName] ?? ByteCounters()
+                cumulative.rx += drx
+                cumulative.tx += dtx
+                appCumulativeUsage[cleanName] = cumulative
+
+                let prevSpeed = currentIntervalSpeeds[cleanName] ?? (rx: 0, tx: 0)
+                currentIntervalSpeeds[cleanName] = (
+                    rx: prevSpeed.rx + (drx / 2),
+                    tx: prevSpeed.tx + (dtx / 2)
+                )
+            }
+        }
+
+        previousNettopRaw = rawSnapshot
+        appLiveSpeeds = currentIntervalSpeeds
+
+        // Update database record for persistence
+        let currentDayKey = Self.currentDateKey()
+        if var dayRec = database.days[currentDayKey] {
+            dayRec.appUsage = appCumulativeUsage
+            database.days[currentDayKey] = dayRec
+        }
+
+        resortTopApps()
+    }
+
+    private func resortTopApps() {
+        var items: [AppUsageItem] = []
+
+        for (appName, counts) in appCumulativeUsage {
+            // Ignore trivial entries < 5KB unless they have active live speed
+            let speed = appLiveSpeeds[appName] ?? (rx: 0, tx: 0)
+            let totalSpeed = speed.rx + speed.tx
+
+            if counts.total > 5120 || totalSpeed > 0 {
+                items.append(
+                    AppUsageItem(
+                        name: appName,
+                        rxBytes: counts.rx,
+                        txBytes: counts.tx,
+                        currentRxSpeed: speed.rx,
+                        currentTxSpeed: speed.tx
+                    )
+                )
+            }
+        }
+
+        if appSortMode == .total {
+            items.sort(by: { $0.totalBytes > $1.totalBytes })
+        } else {
+            items.sort(by: {
+                if $0.currentSpeed != $1.currentSpeed {
+                    return $0.currentSpeed > $1.currentSpeed
+                }
+                return $0.totalBytes > $1.totalBytes
+            })
+        }
+
+        self.topApps = Array(items.prefix(15))
+    }
+
+    nonisolated private static func runNettopSample() -> [String: (rx: UInt64, tx: UInt64)] {
+        let task = Process()
+        task.launchPath = "/usr/bin/nettop"
+        task.arguments = ["-P", "-L", "1", "-J", "bytes_in,bytes_out"]
+
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = FileHandle.nullDevice
+
+        do {
+            try task.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            task.waitUntilExit()
+
+            guard let output = String(data: data, encoding: .utf8) else { return [:] }
+
+            var results: [String: (rx: UInt64, tx: UInt64)] = [:]
+            for line in output.components(separatedBy: "\n") {
+                let parts = line.split(separator: ",", omittingEmptySubsequences: false).map { String($0) }
+                guard parts.count >= 3 else { continue }
+
+                let procRaw = parts[0].trimmingCharacters(in: .whitespaces)
+                guard !procRaw.isEmpty, procRaw != "time" && procRaw != "interface" else { continue }
+
+                let rx = UInt64(parts[1].trimmingCharacters(in: .whitespaces)) ?? 0
+                let tx = UInt64(parts[2].trimmingCharacters(in: .whitespaces)) ?? 0
+                results[procRaw] = (rx: rx, tx: tx)
+            }
+            return results
+        } catch {
+            return [:]
+        }
+    }
+
+    nonisolated static func cleanAppName(_ raw: String) -> String {
+        var name = raw
+        if let dotIndex = name.lastIndex(of: ".") {
+            let suffix = name[name.index(after: dotIndex)...]
+            if Int(suffix) != nil {
+                name = String(name[..<dotIndex])
+            }
+        }
+        name = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let lower = name.lowercased()
+
+        if lower.contains("webkit") || lower == "safari" || lower.hasPrefix("safari") {
+            return "Safari"
+        } else if lower.contains("chrome") {
+            return "Google Chrome"
+        } else if lower.contains("firefox") || lower.contains("plugin-containe") {
+            return "Firefox"
+        } else if lower.contains("edge") {
+            return "Microsoft Edge"
+        } else if lower.contains("brave") {
+            return "Brave Browser"
+        } else if lower.contains("arc") {
+            return "Arc Browser"
+        } else if lower.contains("telegram") {
+            return "Telegram"
+        } else if lower.contains("whatsapp") {
+            return "WhatsApp"
+        } else if lower.contains("signal") {
+            return "Signal"
+        } else if lower.contains("discord") {
+            return "Discord"
+        } else if lower.contains("slack") {
+            return "Slack"
+        } else if lower.contains("spotify") {
+            return "Spotify"
+        } else if lower.contains("apple music") || lower == "music" {
+            return "Apple Music"
+        } else if lower.contains("code") || lower.contains("electron") {
+            return "VS Code"
+        } else if lower.contains("xcode") || lower == "lldb" || lower.contains("simctl") {
+            return "Xcode"
+        } else if lower.contains("antigravity") {
+            return "Antigravity"
+        } else if lower.contains("cursor") {
+            return "Cursor"
+        } else if lower.contains("zoom") {
+            return "Zoom"
+        } else if lower.contains("notion") {
+            return "Notion"
+        } else if lower.contains("figma") {
+            return "Figma"
+        } else if lower.contains("adobe") || lower.contains("creative cloud") {
+            return "Adobe Creative Cloud"
+        } else if lower.contains("dropbox") {
+            return "Dropbox"
+        } else if lower.contains("onedrive") {
+            return "OneDrive"
+        } else if lower == "curl" || lower == "git" || lower == "ssh" || lower == "wget" || lower == "terminal" || lower == "zsh" || lower == "bash" {
+            return "Terminal & CLI"
+        } else if lower.contains("tunnel") || lower.contains("wireguard") || lower.contains("openvpn") {
+            return "VPN Tunnel Services"
+        } else if ["mdnsresponder", "launchd", "apsd", "symptomsd", "timed", "trustd", "airportd", "syslogd", "networkd", "kdc", "rapportd", "identityservice", "sharingd", "cloudd", "bird", "nsurlsessiond", "wifivelocityd"].contains(lower) {
+            return "macOS System Services"
+        }
+        return name
     }
 
     // MARK: - Chart Data Aggregation
@@ -452,65 +692,6 @@ final class NetworkMonitor: ObservableObject {
         summaryPeak = "\(Self.formatCompact(UInt64(peakSpeed)))/s"
     }
 
-    // MARK: - Process Traffic
-    private func updateProcessStats() async {
-        let task = Process()
-        task.launchPath = "/usr/bin/nettop"
-        task.arguments = ["-P", "-L", "1", "-J", "bytes_in,bytes_out"]
-
-        let pipe = Pipe()
-        task.standardOutput = pipe
-        task.standardError = FileHandle.nullDevice
-
-        do {
-            try task.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            task.waitUntilExit()
-
-            guard let output = String(data: data, encoding: .utf8) else { return }
-            let parsed = Self.parseNettopOutput(output)
-            await MainActor.run { self.topApps = parsed }
-        } catch {}
-    }
-
-    nonisolated private static func parseNettopOutput(_ raw: String) -> [AppUsageItem] {
-        var items: [AppUsageItem] = []
-        let lines = raw.components(separatedBy: "\n")
-
-        for line in lines {
-            let parts = line.split(separator: ",", omittingEmptySubsequences: false).map { String($0) }
-            guard parts.count >= 3 else { continue }
-
-            let procRaw = parts[0].trimmingCharacters(in: .whitespaces)
-            guard !procRaw.isEmpty, procRaw != "time" && procRaw != "interface" else { continue }
-
-            let dotIndex = procRaw.lastIndex(of: ".")
-            let procName: String
-            let pidVal: Int32
-            if let dot = dotIndex {
-                procName = String(procRaw[..<dot])
-                pidVal = Int32(procRaw[procRaw.index(after: dot)...]) ?? 0
-            } else {
-                procName = procRaw
-                pidVal = 0
-            }
-
-            let rx = UInt64(parts[1].trimmingCharacters(in: .whitespaces)) ?? 0
-            let tx = UInt64(parts[2].trimmingCharacters(in: .whitespaces)) ?? 0
-
-            if (rx + tx) > 5120 {
-                items.append(AppUsageItem(
-                    id: "\(procName)_\(pidVal)",
-                    name: procName,
-                    pid: pidVal,
-                    rxBytes: rx,
-                    txBytes: tx
-                ))
-            }
-        }
-        return items.sorted(by: { $0.totalBytes > $1.totalBytes }).prefix(10).map { $0 }
-    }
-
     // MARK: - Network Snapshot
     nonisolated static func captureSnapshot() -> [String: ByteCounters] {
         var first: UnsafeMutablePointer<ifaddrs>?
@@ -571,14 +752,19 @@ final class NetworkMonitor: ObservableObject {
         if let currentRec = database.days[key] {
             todayInternet = currentRec.internet
             todayVPN = currentRec.vpn
+            if let savedApps = currentRec.appUsage {
+                appCumulativeUsage = savedApps
+            }
         } else {
             todayInternet = ByteCounters()
             todayVPN = ByteCounters()
+            appCumulativeUsage = [:]
             database.days[key] = DayRecord(
                 dateKey: key,
                 internet: ByteCounters(),
                 vpn: ByteCounters(),
-                hourly: [:]
+                hourly: [:],
+                appUsage: [:]
             )
             saveDatabase()
         }
@@ -598,12 +784,16 @@ final class NetworkMonitor: ObservableObject {
         if let rec = database.days[todayKey] {
             todayInternet = rec.internet
             todayVPN = rec.vpn
+            if let savedApps = rec.appUsage {
+                appCumulativeUsage = savedApps
+            }
         } else {
             database.days[todayKey] = DayRecord(
                 dateKey: todayKey,
                 internet: ByteCounters(),
                 vpn: ByteCounters(),
-                hourly: [:]
+                hourly: [:],
+                appUsage: [:]
             )
         }
     }
@@ -613,6 +803,7 @@ final class NetworkMonitor: ObservableObject {
         if var rec = database.days[todayKey] {
             rec.internet = todayInternet
             rec.vpn = todayVPN
+            rec.appUsage = appCumulativeUsage
             database.days[todayKey] = rec
         }
 
@@ -625,6 +816,10 @@ final class NetworkMonitor: ObservableObject {
         database = TrafficDatabase(days: [:])
         todayInternet = ByteCounters()
         todayVPN = ByteCounters()
+        appCumulativeUsage = [:]
+        appLiveSpeeds = [:]
+        previousNettopRaw = [:]
+        topApps = []
         minutePoints = (0..<60).map { MinuteSpeedPoint(index: $0, rxSpeed: 0, txSpeed: 0) }
         saveDatabase()
         refreshChartData()
@@ -657,7 +852,8 @@ final class NetworkMonitor: ObservableObject {
                 dateKey: key,
                 internet: ByteCounters(rx: baseRx, tx: baseTx),
                 vpn: ByteCounters(rx: baseRx / 3, tx: baseTx / 3),
-                hourly: hourlyMap
+                hourly: hourlyMap,
+                appUsage: [:]
             )
         }
         self.database = TrafficDatabase(days: days)
@@ -1518,43 +1714,82 @@ struct SummaryCard: View {
     }
 }
 
-// MARK: - Apps Tab
+// MARK: - Apps Tab (Real Continuous Network Activity)
 struct AppsTabView: View {
     @ObservedObject var monitor: NetworkMonitor
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 9) {
+            // Apps Header & Sort Mode Picker
             HStack {
-                HStack(spacing: 5) {
-                    Image(systemName: "flame.fill")
-                        .foregroundStyle(.orange)
-                    Text("Top Network Applications")
+                HStack(spacing: 6) {
+                    Image(systemName: "app.badge.checkmark.fill")
+                        .foregroundStyle(.cyan)
+                    Text("Application Bandwidth")
                         .font(.system(size: 12, weight: .bold))
                 }
+
                 Spacer()
-                Text("Kernel-level live sampling")
-                    .font(.system(size: 9.5))
-                    .foregroundStyle(.tertiary)
+
+                // Sort Mode Toggle: Total Today vs Live Speed
+                HStack(spacing: 2) {
+                    ForEach(AppSortMode.allCases) { mode in
+                        Button {
+                            withAnimation(.easeInOut(duration: 0.15)) {
+                                monitor.appSortMode = mode
+                            }
+                        } label: {
+                            Text(mode.rawValue)
+                                .font(.system(size: 9.5, weight: monitor.appSortMode == mode ? .bold : .regular))
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 3)
+                                .background {
+                                    if monitor.appSortMode == mode {
+                                        RoundedRectangle(cornerRadius: 5)
+                                            .fill(Color.primary.opacity(0.12))
+                                    }
+                                }
+                                .foregroundStyle(monitor.appSortMode == mode ? Color.primary : Color.secondary)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .padding(2)
+                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 7))
             }
 
             if monitor.topApps.isEmpty {
                 VStack(spacing: 8) {
                     ProgressView().controlSize(.small)
-                    Text("Analyzing network packets...")
+                    Text("Sampling active network sockets...")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
                 .frame(maxWidth: .infinity)
-                .padding(.vertical, 32)
+                .padding(.vertical, 36)
             } else {
+                let maxMetric: UInt64 = {
+                    if monitor.appSortMode == .liveSpeed {
+                        return monitor.topApps.map { $0.currentSpeed }.max() ?? 1
+                    } else {
+                        return monitor.topApps.first?.totalBytes ?? 1
+                    }
+                }()
+
                 ScrollView(showsIndicators: false) {
                     VStack(spacing: 7) {
-                        ForEach(monitor.topApps) { app in
-                            AppUsageRow(item: app, maxBytes: monitor.topApps.first?.totalBytes ?? 1)
+                        ForEach(Array(monitor.topApps.enumerated()), id: \.element.id) { index, app in
+                            AppUsageRow(
+                                rank: index + 1,
+                                item: app,
+                                maxMetric: max(1, maxMetric),
+                                mode: monitor.appSortMode,
+                                todayTotal: max(1, monitor.todayInternet.total)
+                            )
                         }
                     }
                 }
-                .frame(maxHeight: 300)
+                .frame(maxHeight: 290)
             }
         }
         .padding(12)
@@ -1567,18 +1802,28 @@ struct AppsTabView: View {
 }
 
 struct AppUsageRow: View {
+    let rank: Int
     let item: AppUsageItem
-    let maxBytes: UInt64
+    let maxMetric: UInt64
+    let mode: AppSortMode
+    let todayTotal: UInt64
 
     var ratio: Double {
-        guard maxBytes > 0 else { return 0 }
-        return Double(item.totalBytes) / Double(maxBytes)
+        let value = mode == .liveSpeed ? item.currentSpeed : item.totalBytes
+        guard maxMetric > 0 else { return 0 }
+        return Double(value) / Double(maxMetric)
     }
 
     var body: some View {
         VStack(spacing: 4) {
             HStack(spacing: 8) {
-                // Smart App Icon
+                // Rank Number
+                Text("#\(rank)")
+                    .font(.system(size: 9, weight: .bold, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                    .frame(width: 18, alignment: .leading)
+
+                // App Icon
                 ZStack {
                     RoundedRectangle(cornerRadius: 6)
                         .fill(item.iconColor.opacity(0.18))
@@ -1588,17 +1833,32 @@ struct AppUsageRow: View {
                         .foregroundStyle(item.iconColor)
                 }
 
+                // App Name
                 Text(item.name)
-                    .font(.system(size: 12, weight: .medium))
+                    .font(.system(size: 11.5, weight: .semibold))
                     .lineLimit(1)
+
+                // Live Speed Pill if transmitting
+                if item.currentSpeed > 0 {
+                    HStack(spacing: 3) {
+                        Circle().fill(Color.green).frame(width: 4, height: 4)
+                        Text("\(NetworkMonitor.formatSpeed(Double(item.currentSpeed)))")
+                            .font(.system(size: 8.5, weight: .bold, design: .monospaced))
+                            .foregroundStyle(.green)
+                    }
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 1.5)
+                    .background(Color.green.opacity(0.15), in: Capsule())
+                }
 
                 Spacer()
 
+                // Data Metrics
                 HStack(spacing: 7) {
                     Text("↓\(NetworkMonitor.formatCompact(item.rxBytes))")
-                        .foregroundStyle(.cyan)
+                        .foregroundStyle(.cyan.opacity(0.85))
                     Text("↑\(NetworkMonitor.formatCompact(item.txBytes))")
-                        .foregroundStyle(.purple)
+                        .foregroundStyle(.purple.opacity(0.85))
                     Text(NetworkMonitor.formatCompact(item.totalBytes))
                         .fontWeight(.bold)
                 }
@@ -1608,8 +1868,8 @@ struct AppUsageRow: View {
             // Dual Gradient Visual Progress Bar
             GeometryReader { geo in
                 let w = geo.size.width
-                let rxRatio = Double(item.rxBytes) / Double(max(1, maxBytes))
-                let txRatio = Double(item.txBytes) / Double(max(1, maxBytes))
+                let rxRatio = Double(item.rxBytes) / Double(max(1, maxMetric))
+                let txRatio = Double(item.txBytes) / Double(max(1, maxMetric))
 
                 ZStack(alignment: .leading) {
                     Capsule()
@@ -1619,18 +1879,18 @@ struct AppUsageRow: View {
                     HStack(spacing: 1) {
                         Capsule()
                             .fill(LinearGradient(colors: [.cyan, .blue], startPoint: .leading, endPoint: .trailing))
-                            .frame(width: max(w * CGFloat(rxRatio), 3), height: 5)
+                            .frame(width: max(w * CGFloat(min(1.0, rxRatio)), 3), height: 5)
 
                         Capsule()
                             .fill(LinearGradient(colors: [.purple, .pink], startPoint: .leading, endPoint: .trailing))
-                            .frame(width: max(w * CGFloat(txRatio), 2), height: 5)
+                            .frame(width: max(w * CGFloat(min(1.0, txRatio)), 2), height: 5)
                     }
                 }
             }
             .frame(height: 5)
         }
         .padding(.horizontal, 9)
-        .padding(.vertical, 7)
+        .padding(.vertical, 6)
         .background(Color.white.opacity(0.03), in: RoundedRectangle(cornerRadius: 9))
     }
 }
