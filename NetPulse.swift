@@ -64,6 +64,7 @@ struct DayRecord: Codable {
     var internet: ByteCounters
     var vpn: ByteCounters
     var hourly: [String: ByteCounters]   // "00"..."23"
+    var apps: [String: ByteCounters]? = nil   // per-app totals for this day
 }
 
 struct TrafficDatabase: Codable {
@@ -114,7 +115,7 @@ struct AppUsageItem: Identifiable {
     var rateTotal: Double { rxRate + txRate }
     var sessionTotal: UInt64 { rxSession + txSession }
 
-    var icon: NSImage? { NSRunningApplication(processIdentifier: pid)?.icon }
+    var icon: NSImage? { pid > 0 ? NSRunningApplication(processIdentifier: pid)?.icon : nil }
 
     var symbol: String {
         let l = name.lowercased()
@@ -172,7 +173,7 @@ enum ActiveTab: String, CaseIterable, Identifiable {
 }
 
 enum AppMode: String, CaseIterable, Identifiable {
-    case live = "Now", session = "Session"
+    case live = "Now", session = "Today"
     var id: String { rawValue }
 }
 
@@ -233,7 +234,7 @@ final class NetworkMonitor: ObservableObject {
 
     // per-app bookkeeping
     private var appLive: [String: (pid: Int32, rx: Double, tx: Double)] = [:]
-    private var appSession: [String: ByteCounters] = [:]
+    private var appBaselineDone = false
     private var appPIDs: [String: Int32] = [:]
     private var lastPollCumulative: [String: ProcCounter] = [:]
 
@@ -274,8 +275,10 @@ final class NetworkMonitor: ObservableObject {
         appTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                if self.popoverVisible && self.activeTab == .apps { await self.pollApps() }
-                try? await Task.sleep(nanoseconds: 2_000_000_000)
+                // Always accumulate per-app totals; poll faster only while the Apps tab is open.
+                let watching = self.popoverVisible && self.activeTab == .apps
+                await self.pollApps(needRate: watching)
+                try? await Task.sleep(nanoseconds: watching ? 2_000_000_000 : 10_000_000_000)
             }
         }
     }
@@ -457,40 +460,59 @@ final class NetworkMonitor: ObservableObject {
 
     struct ProcCounter { let name: String; let pid: Int32; let rx: UInt64; let tx: UInt64 }
 
-    private func pollApps() async {
-        let blocks = await Task.detached(priority: .utility) { Self.nettopSnapshots() }.value
-        guard blocks.count >= 2 else { return }
-        let first = blocks[blocks.count - 2]
-        let last = blocks[blocks.count - 1]
+    private func pollApps(needRate: Bool) async {
+        let blocks = await Task.detached(priority: .utility) { Self.nettopSnapshots(samples: needRate ? 2 : 1) }.value
+        guard let last = blocks.last else { return }
+        let first: [String: ProcCounter]? = blocks.count >= 2 ? blocks[blocks.count - 2] : nil
 
         var live: [String: (pid: Int32, rx: Double, tx: Double)] = [:]
+        let dayKey = Fmt.dayKey(Date())
+        var rec = database.days[dayKey] ?? DayRecord(dateKey: dayKey, internet: ByteCounters(), vpn: ByteCounters(), hourly: [:])
+        var apps = rec.apps ?? [:]
+
         for (key, cur) in last {
             appPIDs[cur.name] = cur.pid
+
             // Rate: delta between the two samples inside this poll (~1 s apart).
-            if let old = first[key], cur.rx >= old.rx, cur.tx >= old.tx, (cur.rx - old.rx) + (cur.tx - old.tx) > 0 {
+            if let old = first?[key], cur.rx >= old.rx, cur.tx >= old.tx,
+               (cur.rx - old.rx) + (cur.tx - old.tx) > 0 {
                 var e = live[cur.name] ?? (pid: cur.pid, rx: 0, tx: 0)
                 e.rx += Double(cur.rx - old.rx)
                 e.tx += Double(cur.tx - old.tx)
                 live[cur.name] = e
             }
-            // Session: delta against the previous poll's cumulative counters (gap-safe).
-            let base = lastPollCumulative[key] ?? first[key]
-            if let b = base, cur.rx >= b.rx, cur.tx >= b.tx {
-                appSession[cur.name, default: ByteCounters()].add(ByteCounters(rx: cur.rx - b.rx, tx: cur.tx - b.tx))
+
+            // Daily totals: delta against the previous poll's cumulative counters.
+            // Works for any poll interval, so nothing is lost between polls.
+            guard appBaselineDone else { continue }
+            var drx = cur.rx, dtx = cur.tx            // process appeared since last poll: all of it is new
+            if let b = lastPollCumulative[key] {
+                guard cur.rx >= b.rx, cur.tx >= b.tx else { continue }
+                drx = cur.rx - b.rx
+                dtx = cur.tx - b.tx
+            }
+            if drx + dtx > 0 {
+                apps[cur.name, default: ByteCounters()].add(ByteCounters(rx: drx, tx: dtx))
             }
         }
+
+        appBaselineDone = true
         lastPollCumulative = last
-        appLive = live
+        appLive = needRate ? live : [:]
+        rec.apps = apps
+        database.days[dayKey] = rec
         appsLoaded = true
         rebuildApps()
     }
 
     private func rebuildApps() {
-        var names = Set(appSession.keys)
+        let todayApps = database.days[Fmt.dayKey(Date())]?.apps ?? [:]
+        var names = Set(todayApps.keys)
         names.formUnion(appLive.keys)
+
         var items: [AppUsageItem] = names.map { n in
             let l = appLive[n]
-            let s = appSession[n] ?? ByteCounters()
+            let s = todayApps[n] ?? ByteCounters()
             return AppUsageItem(id: n, name: n, pid: l?.pid ?? appPIDs[n] ?? 0,
                                 rxRate: l?.rx ?? 0, txRate: l?.tx ?? 0, rxSession: s.rx, txSession: s.tx)
         }
@@ -500,14 +522,28 @@ final class NetworkMonitor: ObservableObject {
         case .session:
             items = items.filter { $0.sessionTotal > 0 }.sorted { $0.sessionTotal > $1.sessionTotal }
         }
-        topApps = Array(items.prefix(12))
+        items = Array(items.prefix(12))
+
+        // Reconcile with the interface counters: whatever per-app attribution could not see
+        // (system daemons, very short-lived processes, protocol overhead) is shown honestly.
+        if appMode == .session {
+            let attRx = todayApps.values.reduce(0) { $0 + $1.rx }
+            let attTx = todayApps.values.reduce(0) { $0 + $1.tx }
+            let otherRx = todayInternet.rx > attRx ? todayInternet.rx - attRx : 0
+            let otherTx = todayInternet.tx > attTx ? todayInternet.tx - attTx : 0
+            if otherRx + otherTx > 0 {
+                items.append(AppUsageItem(id: "__other__", name: "System & other", pid: 0,
+                                          rxRate: 0, txRate: 0, rxSession: otherRx, txSession: otherTx))
+            }
+        }
+        topApps = items
     }
 
-    nonisolated static func nettopSnapshots() -> [[String: ProcCounter]] {
+    nonisolated static func nettopSnapshots(samples: Int) -> [[String: ProcCounter]] {
         let task = Process()
         task.executableURL = URL(fileURLWithPath: "/usr/bin/nettop")
         // two samples 1s apart; external interfaces only (no loopback noise)
-        task.arguments = ["-P", "-L", "2", "-s", "1", "-t", "external", "-n", "-J", "bytes_in,bytes_out"]
+        task.arguments = ["-P", "-L", "\(samples)", "-s", "1", "-t", "external", "-n", "-J", "bytes_in,bytes_out"]
         let pipe = Pipe()
         task.standardOutput = pipe
         task.standardError = FileHandle.nullDevice
@@ -648,7 +684,6 @@ final class NetworkMonitor: ObservableObject {
         database = TrafficDatabase(days: [:])
         todayInternet = ByteCounters()
         todayVPN = ByteCounters()
-        appSession = [:]
         saveDatabase()
         refreshChartData()
         rebuildApps()
@@ -1026,10 +1061,10 @@ struct AppsTabView: View {
             }
 
             if !monitor.appsLoaded {
-                placeholder("Sampling…")
+                placeholder("Loading…")
             } else if monitor.topApps.isEmpty {
                 placeholder(monitor.appMode == .live ? "No app is using the network right now"
-                                                     : "Nothing recorded this session yet")
+                                                     : "Nothing recorded today yet")
             } else {
                 ScrollView {
                     VStack(spacing: 0) {
@@ -1040,7 +1075,11 @@ struct AppsTabView: View {
                     }
                 }
                 .scrollIndicators(.hidden)
-                .frame(maxHeight: 270)
+                .frame(maxHeight: 250)
+                if monitor.appMode == .session {
+                    Text("Counts traffic seen while NetPulse is running. “System & other” is everything per-app tracking could not attribute.")
+                        .font(.system(size: 9)).foregroundStyle(.tertiary)
+                }
             }
         }
     }
