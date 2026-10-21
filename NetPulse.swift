@@ -777,11 +777,37 @@ struct DashboardView: View {
     }
 }
 
-struct HeaderView: View {
-    @ObservedObject var monitor: NetworkMonitor
+struct AppHeaderLogo: View {
+    private var logoImage: NSImage? {
+        if let url = Bundle.main.url(forResource: "AppLogo", withExtension: "png"),
+           let img = NSImage(contentsOf: url) {
+            return img
+        }
+        if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
+           let img = NSImage(contentsOf: url) {
+            return img
+        }
+        let devPath = "/Users/elyananasiri/NetPulseProject/assets/logo.png"
+        if FileManager.default.fileExists(atPath: devPath),
+           let img = NSImage(contentsOfFile: devPath) {
+            return img
+        }
+        return nil
+    }
 
     var body: some View {
-        HStack(spacing: 10) {
+        if let img = logoImage {
+            Image(nsImage: img)
+                .resizable()
+                .aspectRatio(contentMode: .fit)
+                .frame(width: 34, height: 34)
+                .clipShape(RoundedRectangle(cornerRadius: 8))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 8)
+                        .strokeBorder(Color.white.opacity(0.18), lineWidth: 0.8)
+                )
+                .shadow(color: Color.blue.opacity(0.35), radius: 4, y: 1)
+        } else {
             ZStack {
                 RoundedRectangle(cornerRadius: 9)
                     .fill(LinearGradient(colors: [Color.blue.opacity(0.3), Color.purple.opacity(0.2)],
@@ -792,6 +818,16 @@ struct HeaderView: View {
                     .font(.system(size: 16, weight: .bold))
                     .foregroundStyle(LinearGradient(colors: [.cyan, .blue], startPoint: .top, endPoint: .bottom))
             }
+        }
+    }
+}
+
+struct HeaderView: View {
+    @ObservedObject var monitor: NetworkMonitor
+
+    var body: some View {
+        HStack(spacing: 10) {
+            AppHeaderLogo()
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {

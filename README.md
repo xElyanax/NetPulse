@@ -1,9 +1,15 @@
-# NetPulse PRO 🌐⚡
+<p align="center">
+  <img src="assets/logo.png" width="120" height="120" alt="NetPulse PRO Logo" style="border-radius: 24px;">
+  <br>
+  <h1 align="center">NetPulse PRO 🌐⚡</h1>
+</p>
 
-[![Platform: macOS](https://img.shields.io/badge/Platform-macOS%2013%2B-blue?logo=apple)](https://www.apple.com/macos/)
-[![Architecture: Universal Binary](https://img.shields.io/badge/Architecture-Universal%20(Apple%20Silicon%20%2B%20Intel)-purple)]()
-[![Swift](https://img.shields.io/badge/Swift-5.9%2B-orange?logo=swift)](https://swift.org)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+<p align="center">
+  <a href="https://www.apple.com/macos/"><img src="https://img.shields.io/badge/Platform-macOS%2013%2B-blue?logo=apple" alt="Platform: macOS"></a>
+  <img src="https://img.shields.io/badge/Architecture-Universal%20(Apple%20Silicon%20%2B%20Intel)-purple" alt="Architecture">
+  <a href="https://swift.org"><img src="https://img.shields.io/badge/Swift-5.9%2B-orange?logo=swift" alt="Swift"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-green.svg" alt="License: MIT"></a>
+</p>
 
 **NetPulse PRO** is a lightweight, high-performance menu bar application for macOS designed to monitor network throughput, bandwidth usage, and per-application network consumption with real-time Swift Charts.
 
