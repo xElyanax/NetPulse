@@ -3,127 +3,146 @@ import Charts
 import Foundation
 import Darwin
 import AppKit
+import ServiceManagement
+
+// MARK: - Formatting (cached formatters, locale-independent storage keys)
+
+enum Fmt {
+    private static func make(_ format: String) -> DateFormatter {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.calendar = Calendar(identifier: .gregorian)
+        f.dateFormat = format
+        return f
+    }
+    private static let dayF = make("yyyy-MM-dd")
+    private static let hourF = make("HH")
+    private static let monthF = make("yyyy-MM")
+    private static let hourLabelF = make("HH:00")
+    private static let dayLabelF: DateFormatter = {
+        let f = DateFormatter(); f.setLocalizedDateFormatFromTemplate("dMMM"); return f
+    }()
+    private static let monthLabelF: DateFormatter = {
+        let f = DateFormatter(); f.setLocalizedDateFormatFromTemplate("MMM"); return f
+    }()
+
+    static func dayKey(_ d: Date) -> String { dayF.string(from: d) }
+    static func hourKey(_ d: Date) -> String { hourF.string(from: d) }
+    static func monthKey(_ d: Date) -> String { monthF.string(from: d) }
+    static func hourLabel(_ d: Date) -> String { hourLabelF.string(from: d) }
+    static func dayLabel(_ d: Date) -> String { dayLabelF.string(from: d) }
+    static func monthLabel(_ d: Date) -> String { monthLabelF.string(from: d) }
+
+    static func bytes(_ n: Double) -> String {
+        ByteCountFormatter.string(fromByteCount: Int64(max(0, n)), countStyle: .file)
+    }
+    static func bytes(_ n: UInt64) -> String { bytes(Double(n)) }
+
+    /// Input is bytes/second. Output follows the "useBits" user setting.
+    static func speed(_ bytesPerSec: Double) -> String {
+        let bits = UserDefaults.standard.bool(forKey: "useBits")
+        var x = max(0, bytesPerSec) * (bits ? 8 : 1)
+        let units = bits ? ["bps", "Kbps", "Mbps", "Gbps"] : ["B/s", "KB/s", "MB/s", "GB/s"]
+        var i = 0
+        while x >= 1000 && i < units.count - 1 { x /= 1000; i += 1 }
+        if i == 0 { return String(format: "%.0f %@", x, units[0]) }
+        return String(format: x >= 100 ? "%.0f %@" : "%.1f %@", x, units[i])
+    }
+}
 
 // MARK: - Data Models
 
-enum AppSortMode: String, CaseIterable, Identifiable {
-    case total = "Total Today"
-    case liveSpeed = "Live Speed"
-    var id: String { rawValue }
-}
-
-struct AppUsageItem: Identifiable, Codable, Equatable {
-    var id: String { name }
-    let name: String
-    var rxBytes: UInt64
-    var txBytes: UInt64
-    var currentRxSpeed: UInt64 = 0
-    var currentTxSpeed: UInt64 = 0
-    var totalBytes: UInt64 { rxBytes + txBytes }
-    var currentSpeed: UInt64 { currentRxSpeed + currentTxSpeed }
-
-    var iconName: String {
-        let lower = name.lowercased()
-        if lower.contains("safari") { return "safari.fill" }
-        if lower.contains("chrome") { return "globe" }
-        if lower.contains("firefox") { return "flame.fill" }
-        if lower.contains("edge") { return "network" }
-        if lower.contains("arc") || lower.contains("brave") { return "globe.americas.fill" }
-        if lower.contains("telegram") { return "paperplane.fill" }
-        if lower.contains("whatsapp") { return "phone.fill" }
-        if lower.contains("signal") { return "lock.message.fill" }
-        if lower.contains("discord") { return "bubble.left.and.bubble.right.fill" }
-        if lower.contains("slack") { return "number" }
-        if lower.contains("spotify") || lower.contains("music") { return "music.note" }
-        if lower.contains("vs code") || lower.contains("code") || lower.contains("cursor") { return "chevron.left.forwardslash.chevron.right" }
-        if lower.contains("xcode") { return "hammer.fill" }
-        if lower.contains("antigravity") { return "cpu.fill" }
-        if lower.contains("terminal") { return "terminal.fill" }
-        if lower.contains("vpn") || lower.contains("tunnel") { return "lock.shield.fill" }
-        if lower.contains("system") { return "apple.logo" }
-        if lower.contains("zoom") { return "video.fill" }
-        if lower.contains("cloud") || lower.contains("dropbox") || lower.contains("onedrive") { return "icloud.fill" }
-        if lower.contains("adobe") { return "paintbrush.fill" }
-        return "app.dashed"
-    }
-
-    var iconColor: Color {
-        let lower = name.lowercased()
-        if lower.contains("safari") { return .blue }
-        if lower.contains("chrome") { return .red }
-        if lower.contains("firefox") { return .orange }
-        if lower.contains("edge") { return .teal }
-        if lower.contains("telegram") { return .cyan }
-        if lower.contains("whatsapp") { return .green }
-        if lower.contains("discord") { return .indigo }
-        if lower.contains("slack") { return .purple }
-        if lower.contains("spotify") { return .green }
-        if lower.contains("music") { return .pink }
-        if lower.contains("vs code") { return .blue }
-        if lower.contains("xcode") { return .blue }
-        if lower.contains("antigravity") { return .purple }
-        if lower.contains("terminal") { return .green }
-        if lower.contains("vpn") { return .mint }
-        if lower.contains("system") { return .gray }
-        if lower.contains("zoom") { return .blue }
-        return .accentColor
-    }
-}
-
-struct ByteCounters: Codable {
+struct ByteCounters: Codable, Equatable {
     var rx: UInt64 = 0
     var tx: UInt64 = 0
     var total: UInt64 { rx + tx }
+    mutating func add(_ o: ByteCounters) { rx += o.rx; tx += o.tx }
 }
 
 struct DayRecord: Codable {
-    var dateKey: String                    // "yyyy-MM-dd"
+    var dateKey: String
     var internet: ByteCounters
     var vpn: ByteCounters
-    var hourly: [String: ByteCounters]     // keys: "00", "01", ... "23"
-    var appUsage: [String: ByteCounters]?  // "Google Chrome": { rx, tx }
+    var hourly: [String: ByteCounters]   // "00"..."23"
 }
 
 struct TrafficDatabase: Codable {
     var days: [String: DayRecord]
 }
 
-struct MinuteSpeedPoint: Identifiable, Equatable {
-    let id = UUID()
-    let index: Int
-    let rxSpeed: Double
-    let txSpeed: Double
-    var totalSpeed: Double { rxSpeed + txSpeed }
+struct SpeedSample: Identifiable, Equatable {
+    let id: Int              // monotonically increasing -> stable identity for Swift Charts
+    let time: Date
+    let rx: Double           // bytes / second
+    let tx: Double
+    let rxBytes: UInt64      // raw delta for this tick
+    let txBytes: UInt64
+    var total: Double { rx + tx }
 }
 
-struct ChartBarPoint: Identifiable, Equatable {
-    let id = UUID()
-    let index: Int
+struct BarPoint: Identifiable, Equatable {
+    let id: Int
     let label: String
     let rx: Double
     let tx: Double
     var total: Double { rx + tx }
 }
 
-enum TimeScope: String, CaseIterable, Identifiable {
-    case minute = "Minute"
-    case hourly = "Hourly"
-    case daily = "Daily"
-    case weekly = "Weekly"
-    case monthly = "Monthly"
+struct ScopeSummary {
+    var rx: Double = 0
+    var tx: Double = 0
+    var total: Double = 0
+    var peak: Double = 0
+}
 
+struct Insights {
+    var vsYesterday: Double?
+    var weekAverage: UInt64 = 0
+    var busiestHour: String?
+    var busiestBytes: UInt64 = 0
+}
+
+struct AppUsageItem: Identifiable {
+    let id: String
+    let name: String
+    let pid: Int32
+    let rxRate: Double
+    let txRate: Double
+    let rxSession: UInt64
+    let txSession: UInt64
+
+    var rateTotal: Double { rxRate + txRate }
+    var sessionTotal: UInt64 { rxSession + txSession }
+
+    var icon: NSImage? { NSRunningApplication(processIdentifier: pid)?.icon }
+
+    var symbol: String {
+        let l = name.lowercased()
+        if l.contains("safari") || l.contains("chrome") || l.contains("firefox") || l.contains("edge") || l.contains("arc") { return "globe" }
+        if l.contains("telegram") || l.contains("whatsapp") || l.contains("signal") { return "paperplane.fill" }
+        if l.contains("code") || l.contains("xcode") || l.contains("terminal") || l.contains("zsh") { return "terminal.fill" }
+        if l.contains("spotify") || l.contains("music") { return "music.note" }
+        if l.contains("mail") { return "envelope.fill" }
+        if l.contains("slack") || l.contains("discord") { return "bubble.left.and.bubble.right.fill" }
+        if l.contains("cloud") || l.contains("drive") || l.contains("dropbox") { return "icloud.fill" }
+        if l.contains("git") { return "arrow.triangle.branch" }
+        return "app.dashed"
+    }
+}
+
+enum TimeScope: String, CaseIterable, Identifiable {
+    case minute = "Live", hourly = "Hourly", daily = "Daily", weekly = "Weekly", monthly = "Monthly"
     var id: String { rawValue }
 
-    var titleEnglish: String {
+    var title: String {
         switch self {
-        case .minute: return "Live (60s)"
-        case .hourly: return "Past 24 Hours"
-        case .daily: return "Past 14 Days"
-        case .weekly: return "Past 8 Weeks"
-        case .monthly: return "Past 6 Months"
+        case .minute: return "Live · last 60 seconds"
+        case .hourly: return "Past 24 hours"
+        case .daily: return "Past 14 days"
+        case .weekly: return "Past 8 weeks"
+        case .monthly: return "Past 6 months"
         }
     }
-
     var icon: String {
         switch self {
         case .minute: return "bolt.fill"
@@ -136,20 +155,13 @@ enum TimeScope: String, CaseIterable, Identifiable {
 }
 
 enum ChartFilter: String, CaseIterable, Identifiable {
-    case all = "All"
-    case download = "Download"
-    case upload = "Upload"
-
+    case all = "All", download = "Download", upload = "Upload"
     var id: String { rawValue }
 }
 
 enum ActiveTab: String, CaseIterable, Identifiable {
-    case charts = "Charts"
-    case apps = "Apps"
-    case overview = "Overview"
-
+    case charts = "Charts", apps = "Apps", overview = "Overview"
     var id: String { rawValue }
-
     var icon: String {
         switch self {
         case .charts: return "chart.xyaxis.line"
@@ -159,654 +171,474 @@ enum ActiveTab: String, CaseIterable, Identifiable {
     }
 }
 
+enum AppMode: String, CaseIterable, Identifiable {
+    case live = "Now", session = "Session"
+    var id: String { rawValue }
+}
+
 // MARK: - Core Engine
 
 @MainActor
 final class NetworkMonitor: ObservableObject {
+    // UI state
     @Published var activeTab: ActiveTab = .charts
+    @Published var confirmReset = false
     @Published var selectedScope: TimeScope = .minute {
-        didSet {
-            hoveredBarPoint = nil
-            hoveredMinutePoint = nil
-            refreshChartData()
-        }
+        didSet { endHover(); hoveredBarID = nil; refreshChartData() }
     }
     @Published var selectedFilter: ChartFilter = .all
-    @Published var appSortMode: AppSortMode = .total {
-        didSet { resortTopApps() }
+    @Published var appMode: AppMode = .live { didSet { rebuildApps() } }
+
+    // Live data
+    @Published private(set) var speedRX: Double = 0
+    @Published private(set) var speedTX: Double = 0
+    @Published private(set) var vpnActive = false
+    @Published private(set) var vpnName: String?
+    @Published private(set) var todayInternet = ByteCounters()
+    @Published private(set) var todayVPN = ByteCounters()
+    @Published private(set) var samples: [SpeedSample] = []
+    @Published private(set) var bars: [BarPoint] = []
+    @Published private(set) var summary = ScopeSummary()
+    @Published private(set) var topApps: [AppUsageItem] = []
+    @Published private(set) var appsLoaded = false
+
+    // Hover (inspection) state
+    @Published var hoveredSampleID: Int?
+    @Published var hoveredBarID: Int?
+    @Published private(set) var frozenSamples: [SpeedSample]?
+
+    // Settings (persisted)
+    @Published var useBits: Bool { didSet { UserDefaults.standard.set(useBits, forKey: "useBits") } }
+    @Published var menuBarShowsSpeed: Bool { didSet { UserDefaults.standard.set(menuBarShowsSpeed, forKey: "menuBarShowsSpeed") } }
+    @Published var dailyCapGB: Double { didSet { UserDefaults.standard.set(dailyCapGB, forKey: "dailyCapGB") } }
+    @Published var launchAtLogin: Bool {
+        didSet {
+            do {
+                if launchAtLogin { try SMAppService.mainApp.register() }
+                else { try SMAppService.mainApp.unregister() }
+            } catch { NSLog("NetPulse: launch-at-login failed: \(error)") }
+        }
     }
 
-    @Published var speedRX: UInt64 = 0
-    @Published var speedTX: UInt64 = 0
-    @Published var isVPNActive: Bool = false
-
-    @Published var todayInternet = ByteCounters()
-    @Published var todayVPN = ByteCounters()
-
-    @Published var minutePoints: [MinuteSpeedPoint] = []
-    @Published var chartPoints: [ChartBarPoint] = []
-
-    // Hover Inspection States
-    @Published var hoveredMinutePoint: MinuteSpeedPoint? = nil
-    @Published var hoveredBarPoint: ChartBarPoint? = nil
-
-    @Published var summaryDownload: String = "0 B"
-    @Published var summaryUpload: String = "0 B"
-    @Published var summaryTotal: String = "0 B"
-    @Published var summaryPeak: String = "0 B"
-
-    // Real App Traffic Records
-    @Published var topApps: [AppUsageItem] = []
-    private var appCumulativeUsage: [String: ByteCounters] = [:]
-    private var appLiveSpeeds: [String: (rx: UInt64, tx: UInt64)] = [:]
-    private var previousNettopRaw: [String: (rx: UInt64, tx: UInt64)] = [:]
+    var popoverVisible = true
 
     private var database = TrafficDatabase(days: [:])
-    private var previousSnapshot: [String: ByteCounters] = [:]
+    private var previous: [String: ByteCounters] = [:]
+    private var lastTickUptime = ProcessInfo.processInfo.systemUptime
+    private var nextSampleID = 60
+    private var tickCounter = 0
     private var timer: Timer?
-    private var processTimer: Timer?
-    private var tickCounter: Int = 0
+    private var appTask: Task<Void, Never>?
+    private var observers: [NSObjectProtocol] = []
+
+    // per-app bookkeeping
+    private var appLive: [String: (pid: Int32, rx: Double, tx: Double)] = [:]
+    private var appSession: [String: ByteCounters] = [:]
+    private var appPIDs: [String: Int32] = [:]
+    private var lastPollCumulative: [String: ProcCounter] = [:]
 
     init() {
-        minutePoints = (0..<60).map { i in
-            MinuteSpeedPoint(index: i, rxSpeed: 0, txSpeed: 0)
+        let d = UserDefaults.standard
+        useBits = d.bool(forKey: "useBits")
+        menuBarShowsSpeed = d.object(forKey: "menuBarShowsSpeed") as? Bool ?? true
+        dailyCapGB = d.double(forKey: "dailyCapGB")
+        launchAtLogin = SMAppService.mainApp.status == .enabled
+
+        let start = Date()
+        samples = (0..<60).map { i in
+            SpeedSample(id: i, time: start.addingTimeInterval(Double(i - 59)), rx: 0, tx: 0, rxBytes: 0, txBytes: 0)
         }
 
+        purgeLegacySampleData()
         loadDatabase()
-        previousSnapshot = Self.captureSnapshot()
+        previous = Self.captureCounters()
+        lastTickUptime = ProcessInfo.processInfo.systemUptime
         refreshChartData()
 
-        // 1-second system interface tick
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
+        // .common mode: keeps firing while the menu-bar window is open / being interacted with.
+        let t = Timer(timeInterval: 1.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.tick() }
         }
+        t.tolerance = 0.1
+        RunLoop.main.add(t, forMode: .common)
+        timer = t
 
-        // 2-second per-process nettop sampling
-        processTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            Task { await self?.updateProcessStats() }
+        let nc = NSWorkspace.shared.notificationCenter
+        observers.append(nc.addObserver(forName: NSWorkspace.willSleepNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.saveDatabase() }
+        })
+        observers.append(nc.addObserver(forName: NSWorkspace.didWakeNotification, object: nil, queue: .main) { [weak self] _ in
+            Task { @MainActor in self?.resetBaseline() }
+        })
+
+        appTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                if self.popoverVisible && self.activeTab == .apps { await self.pollApps() }
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
         }
-        Task { await updateProcessStats() }
     }
+
+    // MARK: Menu bar
 
     var menuBarTitle: String {
-        if speedRX > 1024 || speedTX > 1024 {
-            return "↓\(Self.formatCompact(speedRX))/s  ↑\(Self.formatCompact(speedTX))/s"
-        } else {
-            return Self.formatCompact(todayInternet.total)
-        }
+        if menuBarShowsSpeed { return "↓ \(Fmt.speed(speedRX))  ↑ \(Fmt.speed(speedTX))" }
+        return Fmt.bytes(todayInternet.total)
     }
 
-    // MARK: - Tick Loop
+    // MARK: Tick loop
+
+    private func resetBaseline() {
+        previous = Self.captureCounters()
+        lastTickUptime = ProcessInfo.processInfo.systemUptime
+    }
+
     private func tick() {
-        checkDayRollover()
-        let current = Self.captureSnapshot()
+        let uptime = ProcessInfo.processInfo.systemUptime
+        let elapsed = max(0.25, uptime - lastTickUptime)
+        lastTickUptime = uptime
 
-        var deltaPhys = ByteCounters()
-        var deltaTunnel = ByteCounters()
+        let counters = Self.captureCounters()
+        let tunnels = Self.tunnelInterfaces()
 
-        for (name, count) in current {
-            guard let old = previousSnapshot[name] else { continue }
-            guard count.rx >= old.rx, count.tx >= old.tx else { continue }
-
-            let rx = count.rx - old.rx
-            let tx = count.tx - old.tx
-
-            if name == "en0" || name.hasPrefix("en") {
-                deltaPhys.rx += rx
-                deltaPhys.tx += tx
-            } else if name.hasPrefix("utun") {
-                deltaTunnel.rx += rx
-                deltaTunnel.tx += tx
-            }
+        var phys = ByteCounters()
+        var tun = ByteCounters()
+        for (name, c) in counters {
+            // Counters are 64-bit now; a decrease means the interface was reset -> skip one tick.
+            guard let old = previous[name], c.rx >= old.rx, c.tx >= old.tx else { continue }
+            let d = ByteCounters(rx: c.rx - old.rx, tx: c.tx - old.tx)
+            if name.hasPrefix("en") { phys.add(d) }
+            else if tunnels.contains(name) { tun.add(d) }
         }
+        previous = counters
 
-        previousSnapshot = current
-        speedRX = deltaPhys.rx
-        speedTX = deltaPhys.tx
-        isVPNActive = (deltaTunnel.rx + deltaTunnel.tx) > 0
-
-        // Sliding 60-point window
-        var newMinutes = minutePoints
-        if newMinutes.count >= 60 {
-            newMinutes.removeFirst()
-        }
-        newMinutes.append(
-            MinuteSpeedPoint(
-                index: 59,
-                rxSpeed: Double(deltaPhys.rx),
-                txSpeed: Double(deltaPhys.tx)
-            )
+        let now = Date()
+        let sample = SpeedSample(
+            id: nextSampleID, time: now,
+            rx: Double(phys.rx) / elapsed, tx: Double(phys.tx) / elapsed,
+            rxBytes: phys.rx, txBytes: phys.tx
         )
-        for i in 0..<newMinutes.count {
-            newMinutes[i] = MinuteSpeedPoint(
-                index: i,
-                rxSpeed: newMinutes[i].rxSpeed,
-                txSpeed: newMinutes[i].txSpeed
-            )
+        nextSampleID += 1
+        samples.append(sample)
+        if samples.count > 60 { samples.removeFirst(samples.count - 60) }
+
+        speedRX = sample.rx
+        speedTX = sample.tx
+        vpnActive = !tunnels.isEmpty
+        vpnName = tunnels.sorted().first
+
+        // Persist into the database (single source of truth)
+        let dayKey = Fmt.dayKey(now)
+        var rec = database.days[dayKey] ?? DayRecord(dateKey: dayKey, internet: ByteCounters(), vpn: ByteCounters(), hourly: [:])
+        rec.internet.add(phys)
+        rec.vpn.add(tun)
+        if phys.total > 0 {
+            let hk = Fmt.hourKey(now)
+            var h = rec.hourly[hk] ?? ByteCounters()
+            h.add(phys)
+            rec.hourly[hk] = h
         }
-        minutePoints = newMinutes
-
-        // Accumulate today
-        todayInternet.rx += deltaPhys.rx
-        todayInternet.tx += deltaPhys.tx
-        todayVPN.rx += deltaTunnel.rx
-        todayVPN.tx += deltaTunnel.tx
-
-        // Accumulate hourly
-        let currentDayKey = Self.currentDateKey()
-        let currentHourKey = Self.currentHourKey()
-        var dayRecord = database.days[currentDayKey] ?? DayRecord(
-            dateKey: currentDayKey,
-            internet: ByteCounters(),
-            vpn: ByteCounters(),
-            hourly: [:],
-            appUsage: [:]
-        )
-        dayRecord.internet = todayInternet
-        dayRecord.vpn = todayVPN
-
-        var hourCounters = dayRecord.hourly[currentHourKey] ?? ByteCounters()
-        hourCounters.rx += deltaPhys.rx
-        hourCounters.tx += deltaPhys.tx
-        dayRecord.hourly[currentHourKey] = hourCounters
-        dayRecord.appUsage = appCumulativeUsage
-        database.days[currentDayKey] = dayRecord
+        database.days[dayKey] = rec
+        todayInternet = rec.internet
+        todayVPN = rec.vpn
 
         tickCounter += 1
-        if tickCounter % 10 == 0 {
-            saveDatabase()
-        }
+        if tickCounter % 30 == 0 { saveDatabase() }
 
-        if selectedScope == .minute || selectedScope == .hourly {
-            refreshChartData()
+        if popoverVisible {
+            if selectedScope == .minute { summary = minuteSummary() }
+            else if tickCounter % 5 == 0 { refreshChartData() }
         }
     }
 
-    // MARK: - Process Traffic Tracking Engine
-    private func updateProcessStats() async {
-        let rawSnapshot = await Task.detached(priority: .utility) {
-            return Self.runNettopSample()
-        }.value
+    // MARK: Hover
 
-        guard !rawSnapshot.isEmpty else { return }
+    var displaySamples: [SpeedSample] { frozenSamples ?? samples }
+    var hoveredSample: SpeedSample? { displaySamples.first { $0.id == hoveredSampleID } }
+    var hoveredBar: BarPoint? { bars.first { $0.id == hoveredBarID } }
 
-        // If this is the very first sample and cumulative usage is empty, initialize baseline
-        if previousNettopRaw.isEmpty {
-            previousNettopRaw = rawSnapshot
-            if appCumulativeUsage.isEmpty {
-                for (proc, counts) in rawSnapshot {
-                    let cname = Self.cleanAppName(proc)
-                    var curr = appCumulativeUsage[cname] ?? ByteCounters()
-                    curr.rx += counts.rx
-                    curr.tx += counts.tx
-                    appCumulativeUsage[cname] = curr
-                }
-            }
-            resortTopApps()
-            return
-        }
-
-        // Calculate deltas across raw processes
-        var currentIntervalSpeeds: [String: (rx: UInt64, tx: UInt64)] = [:]
-
-        for (proc, currentCounts) in rawSnapshot {
-            let prevCounts = previousNettopRaw[proc] ?? (rx: 0, tx: 0)
-
-            // Delta computation: if connection reset or PID restarted, treat current as new delta
-            let drx = currentCounts.rx >= prevCounts.rx ? (currentCounts.rx - prevCounts.rx) : currentCounts.rx
-            let dtx = currentCounts.tx >= prevCounts.tx ? (currentCounts.tx - prevCounts.tx) : currentCounts.tx
-
-            if drx > 0 || dtx > 0 {
-                let cleanName = Self.cleanAppName(proc)
-                var cumulative = appCumulativeUsage[cleanName] ?? ByteCounters()
-                cumulative.rx += drx
-                cumulative.tx += dtx
-                appCumulativeUsage[cleanName] = cumulative
-
-                let prevSpeed = currentIntervalSpeeds[cleanName] ?? (rx: 0, tx: 0)
-                currentIntervalSpeeds[cleanName] = (
-                    rx: prevSpeed.rx + (drx / 2),
-                    tx: prevSpeed.tx + (dtx / 2)
-                )
-            }
-        }
-
-        previousNettopRaw = rawSnapshot
-        appLiveSpeeds = currentIntervalSpeeds
-
-        // Update database record for persistence
-        let currentDayKey = Self.currentDateKey()
-        if var dayRec = database.days[currentDayKey] {
-            dayRec.appUsage = appCumulativeUsage
-            database.days[currentDayKey] = dayRec
-        }
-
-        resortTopApps()
+    func hover(sampleNear date: Date) {
+        if frozenSamples == nil { frozenSamples = samples }   // freeze scrolling while inspecting
+        let best = displaySamples.min { abs($0.time.timeIntervalSince(date)) < abs($1.time.timeIntervalSince(date)) }
+        hoveredSampleID = best?.id
     }
 
-    private func resortTopApps() {
-        var items: [AppUsageItem] = []
+    func endHover() {
+        hoveredSampleID = nil
+        frozenSamples = nil
+    }
 
-        for (appName, counts) in appCumulativeUsage {
-            // Ignore trivial entries < 5KB unless they have active live speed
-            let speed = appLiveSpeeds[appName] ?? (rx: 0, tx: 0)
-            let totalSpeed = speed.rx + speed.tx
+    // MARK: Chart aggregation
 
-            if counts.total > 5120 || totalSpeed > 0 {
-                items.append(
-                    AppUsageItem(
-                        name: appName,
-                        rxBytes: counts.rx,
-                        txBytes: counts.tx,
-                        currentRxSpeed: speed.rx,
-                        currentTxSpeed: speed.tx
-                    )
-                )
-            }
-        }
+    private func minuteSummary() -> ScopeSummary {
+        let bytes = samples.reduce(0.0) { $0 + Double($1.rxBytes + $1.txBytes) }
+        return ScopeSummary(rx: speedRX, tx: speedTX, total: bytes, peak: samples.map(\.total).max() ?? 0)
+    }
 
-        if appSortMode == .total {
-            items.sort(by: { $0.totalBytes > $1.totalBytes })
-        } else {
-            items.sort(by: {
-                if $0.currentSpeed != $1.currentSpeed {
-                    return $0.currentSpeed > $1.currentSpeed
+    private func setBars(_ pts: [BarPoint]) {
+        bars = pts
+        let rx = pts.reduce(0) { $0 + $1.rx }
+        let tx = pts.reduce(0) { $0 + $1.tx }
+        summary = ScopeSummary(rx: rx, tx: tx, total: rx + tx, peak: pts.map(\.total).max() ?? 0)
+    }
+
+    func refreshChartData() {
+        let cal = Calendar.current
+        let now = Date()
+        switch selectedScope {
+        case .minute:
+            summary = minuteSummary()
+
+        case .hourly:
+            setBars((0..<24).reversed().map { back in
+                let d = now.addingTimeInterval(-Double(back) * 3600)
+                let c = database.days[Fmt.dayKey(d)]?.hourly[Fmt.hourKey(d)] ?? ByteCounters()
+                return BarPoint(id: 23 - back, label: back == 0 ? "Now" : Fmt.hourLabel(d), rx: Double(c.rx), tx: Double(c.tx))
+            })
+
+        case .daily:
+            setBars((0..<14).reversed().map { back in
+                let d = cal.date(byAdding: .day, value: -back, to: now) ?? now
+                let c = database.days[Fmt.dayKey(d)]?.internet ?? ByteCounters()
+                return BarPoint(id: 13 - back, label: back == 0 ? "Today" : Fmt.dayLabel(d), rx: Double(c.rx), tx: Double(c.tx))
+            })
+
+        case .weekly:
+            // Rolling 7-day windows ending today (w = 0 is the last 7 days).
+            setBars((0..<8).reversed().map { w in
+                var sum = ByteCounters()
+                for off in 0..<7 {
+                    if let d = cal.date(byAdding: .day, value: -(w * 7 + off), to: now),
+                       let r = database.days[Fmt.dayKey(d)] { sum.add(r.internet) }
                 }
-                return $0.totalBytes > $1.totalBytes
+                return BarPoint(id: 7 - w, label: w == 0 ? "Last 7d" : "\(w)w ago", rx: Double(sum.rx), tx: Double(sum.tx))
+            })
+
+        case .monthly:
+            var perMonth: [String: ByteCounters] = [:]
+            for (k, r) in database.days { perMonth[String(k.prefix(7)), default: ByteCounters()].add(r.internet) }
+            setBars((0..<6).reversed().map { m in
+                let d = cal.date(byAdding: .month, value: -m, to: now) ?? now
+                let c = perMonth[Fmt.monthKey(d)] ?? ByteCounters()
+                return BarPoint(id: 5 - m, label: m == 0 ? "This month" : Fmt.monthLabel(d), rx: Double(c.rx), tx: Double(c.tx))
             })
         }
-
-        self.topApps = Array(items.prefix(15))
     }
 
-    nonisolated private static func runNettopSample() -> [String: (rx: UInt64, tx: UInt64)] {
-        let task = Process()
-        task.launchPath = "/usr/bin/nettop"
-        task.arguments = ["-P", "-L", "1", "-J", "bytes_in,bytes_out"]
+    func insights() -> Insights {
+        let cal = Calendar.current
+        let now = Date()
+        let hk = Fmt.hourKey(now)
+        let todayHourly = database.days[Fmt.dayKey(now)]?.hourly ?? [:]
 
+        var out = Insights()
+        if let y = cal.date(byAdding: .day, value: -1, to: now), let rec = database.days[Fmt.dayKey(y)] {
+            let ySame = rec.hourly.filter { $0.key <= hk }.values.reduce(0) { $0 + $1.total }
+            if ySame > 0 {
+                let t = Double(todayHourly.values.reduce(0) { $0 + $1.total })
+                out.vsYesterday = (t - Double(ySame)) / Double(ySame) * 100
+            }
+        }
+        var sum: UInt64 = 0, n: UInt64 = 0
+        for i in 1...7 {
+            if let d = cal.date(byAdding: .day, value: -i, to: now),
+               let r = database.days[Fmt.dayKey(d)], r.internet.total > 0 { sum += r.internet.total; n += 1 }
+        }
+        out.weekAverage = n > 0 ? sum / n : 0
+        if let top = todayHourly.max(by: { $0.value.total < $1.value.total }), top.value.total > 0 {
+            out.busiestHour = "\(top.key):00"
+            out.busiestBytes = top.value.total
+        }
+        return out
+    }
+
+    // MARK: Per-app traffic (nettop, off the main thread)
+
+    struct ProcCounter { let name: String; let pid: Int32; let rx: UInt64; let tx: UInt64 }
+
+    private func pollApps() async {
+        let blocks = await Task.detached(priority: .utility) { Self.nettopSnapshots() }.value
+        guard blocks.count >= 2 else { return }
+        let first = blocks[blocks.count - 2]
+        let last = blocks[blocks.count - 1]
+
+        var live: [String: (pid: Int32, rx: Double, tx: Double)] = [:]
+        for (key, cur) in last {
+            appPIDs[cur.name] = cur.pid
+            // Rate: delta between the two samples inside this poll (~1 s apart).
+            if let old = first[key], cur.rx >= old.rx, cur.tx >= old.tx, (cur.rx - old.rx) + (cur.tx - old.tx) > 0 {
+                var e = live[cur.name] ?? (pid: cur.pid, rx: 0, tx: 0)
+                e.rx += Double(cur.rx - old.rx)
+                e.tx += Double(cur.tx - old.tx)
+                live[cur.name] = e
+            }
+            // Session: delta against the previous poll's cumulative counters (gap-safe).
+            let base = lastPollCumulative[key] ?? first[key]
+            if let b = base, cur.rx >= b.rx, cur.tx >= b.tx {
+                appSession[cur.name, default: ByteCounters()].add(ByteCounters(rx: cur.rx - b.rx, tx: cur.tx - b.tx))
+            }
+        }
+        lastPollCumulative = last
+        appLive = live
+        appsLoaded = true
+        rebuildApps()
+    }
+
+    private func rebuildApps() {
+        var names = Set(appSession.keys)
+        names.formUnion(appLive.keys)
+        var items: [AppUsageItem] = names.map { n in
+            let l = appLive[n]
+            let s = appSession[n] ?? ByteCounters()
+            return AppUsageItem(id: n, name: n, pid: l?.pid ?? appPIDs[n] ?? 0,
+                                rxRate: l?.rx ?? 0, txRate: l?.tx ?? 0, rxSession: s.rx, txSession: s.tx)
+        }
+        switch appMode {
+        case .live:
+            items = items.filter { $0.rateTotal > 0 }.sorted { $0.rateTotal > $1.rateTotal }
+        case .session:
+            items = items.filter { $0.sessionTotal > 0 }.sorted { $0.sessionTotal > $1.sessionTotal }
+        }
+        topApps = Array(items.prefix(12))
+    }
+
+    nonisolated static func nettopSnapshots() -> [[String: ProcCounter]] {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/usr/bin/nettop")
+        // two samples 1s apart; external interfaces only (no loopback noise)
+        task.arguments = ["-P", "-L", "2", "-s", "1", "-t", "external", "-n", "-J", "bytes_in,bytes_out"]
         let pipe = Pipe()
         task.standardOutput = pipe
         task.standardError = FileHandle.nullDevice
-
-        do {
-            try task.run()
-            let data = pipe.fileHandleForReading.readDataToEndOfFile()
-            task.waitUntilExit()
-
-            guard let output = String(data: data, encoding: .utf8) else { return [:] }
-
-            var results: [String: (rx: UInt64, tx: UInt64)] = [:]
-            for line in output.components(separatedBy: "\n") {
-                let parts = line.split(separator: ",", omittingEmptySubsequences: false).map { String($0) }
-                guard parts.count >= 3 else { continue }
-
-                let procRaw = parts[0].trimmingCharacters(in: .whitespaces)
-                guard !procRaw.isEmpty, procRaw != "time" && procRaw != "interface" else { continue }
-
-                let rx = UInt64(parts[1].trimmingCharacters(in: .whitespaces)) ?? 0
-                let tx = UInt64(parts[2].trimmingCharacters(in: .whitespaces)) ?? 0
-                results[procRaw] = (rx: rx, tx: tx)
-            }
-            return results
-        } catch {
-            return [:]
-        }
+        do { try task.run() } catch { return [] }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        task.waitUntilExit()
+        guard let text = String(data: data, encoding: .utf8) else { return [] }
+        return parseNettop(text)
     }
 
-    nonisolated static func cleanAppName(_ raw: String) -> String {
-        var name = raw
-        if let dotIndex = name.lastIndex(of: ".") {
-            let suffix = name[name.index(after: dotIndex)...]
-            if Int(suffix) != nil {
-                name = String(name[..<dotIndex])
-            }
-        }
-        name = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let lower = name.lowercased()
+    /// Header-driven parser: every header line (contains "bytes_in") starts a new sample block.
+    nonisolated static func parseNettop(_ text: String) -> [[String: ProcCounter]] {
+        var blocks: [[String: ProcCounter]] = []
+        var current: [String: ProcCounter]?
+        var nameIdx = 0, inIdx = 1, outIdx = 2
 
-        if lower.contains("webkit") || lower == "safari" || lower.hasPrefix("safari") {
-            return "Safari"
-        } else if lower.contains("chrome") {
-            return "Google Chrome"
-        } else if lower.contains("firefox") || lower.contains("plugin-containe") {
-            return "Firefox"
-        } else if lower.contains("edge") {
-            return "Microsoft Edge"
-        } else if lower.contains("brave") {
-            return "Brave Browser"
-        } else if lower.contains("arc") {
-            return "Arc Browser"
-        } else if lower.contains("telegram") {
-            return "Telegram"
-        } else if lower.contains("whatsapp") {
-            return "WhatsApp"
-        } else if lower.contains("signal") {
-            return "Signal"
-        } else if lower.contains("discord") {
-            return "Discord"
-        } else if lower.contains("slack") {
-            return "Slack"
-        } else if lower.contains("spotify") {
-            return "Spotify"
-        } else if lower.contains("apple music") || lower == "music" {
-            return "Apple Music"
-        } else if lower.contains("code") || lower.contains("electron") {
-            return "VS Code"
-        } else if lower.contains("xcode") || lower == "lldb" || lower.contains("simctl") {
-            return "Xcode"
-        } else if lower.contains("antigravity") {
-            return "Antigravity"
-        } else if lower.contains("cursor") {
-            return "Cursor"
-        } else if lower.contains("zoom") {
-            return "Zoom"
-        } else if lower.contains("notion") {
-            return "Notion"
-        } else if lower.contains("figma") {
-            return "Figma"
-        } else if lower.contains("adobe") || lower.contains("creative cloud") {
-            return "Adobe Creative Cloud"
-        } else if lower.contains("dropbox") {
-            return "Dropbox"
-        } else if lower.contains("onedrive") {
-            return "OneDrive"
-        } else if lower == "curl" || lower == "git" || lower == "ssh" || lower == "wget" || lower == "terminal" || lower == "zsh" || lower == "bash" {
-            return "Terminal & CLI"
-        } else if lower.contains("tunnel") || lower.contains("wireguard") || lower.contains("openvpn") {
-            return "VPN Tunnel Services"
-        } else if ["mdnsresponder", "launchd", "apsd", "symptomsd", "timed", "trustd", "airportd", "syslogd", "networkd", "kdc", "rapportd", "identityservice", "sharingd", "cloudd", "bird", "nsurlsessiond", "wifivelocityd"].contains(lower) {
-            return "macOS System Services"
+        for line in text.split(separator: "\n") {
+            let cols = line.split(separator: ",", omittingEmptySubsequences: false)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+
+            if cols.contains("bytes_in") {
+                if let c = current { blocks.append(c) }
+                current = [:]
+                inIdx = cols.firstIndex(of: "bytes_in") ?? 1
+                outIdx = cols.firstIndex(of: "bytes_out") ?? (inIdx + 1)
+                nameIdx = cols.firstIndex(of: "") ?? 0
+                continue
+            }
+            guard current != nil, nameIdx < cols.count, cols.count > max(inIdx, outIdx) else { continue }
+            let proc = cols[nameIdx]
+            guard !proc.isEmpty,
+                  let rx = UInt64(cols[inIdx]), let tx = UInt64(cols[outIdx]) else { continue }
+
+            var name = proc
+            var pid: Int32 = 0
+            if let dot = proc.lastIndex(of: "."), let p = Int32(proc[proc.index(after: dot)...]) {
+                name = String(proc[..<dot]); pid = p
+            }
+            current?["\(name).\(pid)"] = ProcCounter(name: name, pid: pid, rx: rx, tx: tx)
         }
-        return name
+        if let c = current { blocks.append(c) }
+        return blocks
     }
 
-    // MARK: - Chart Data Aggregation
-    func refreshChartData() {
-        switch selectedScope {
-        case .minute:
-            computeMinuteSummary()
+    // MARK: Network counters (64-bit via sysctl NET_RT_IFLIST2)
 
-        case .hourly:
-            let dayRecord = database.days[Self.currentDateKey()]
-            var points: [ChartBarPoint] = []
-            var totalRx: UInt64 = 0
-            var totalTx: UInt64 = 0
-            var peak: UInt64 = 0
+    nonisolated static func captureCounters() -> [String: ByteCounters] {
+        var mib: [Int32] = [CTL_NET, PF_ROUTE, 0, 0, NET_RT_IFLIST2, 0]
+        var len = 0
+        guard sysctl(&mib, UInt32(mib.count), nil, &len, nil, 0) == 0, len > 0 else { return [:] }
+        var buf = [UInt8](repeating: 0, count: len)
+        guard sysctl(&mib, UInt32(mib.count), &buf, &len, nil, 0) == 0 else { return [:] }
 
-            for h in 0..<24 {
-                let hourKey = String(format: "%02d", h)
-                let label = "\(hourKey):00"
-                let count = dayRecord?.hourly[hourKey] ?? ByteCounters()
-                points.append(ChartBarPoint(
-                    index: h,
-                    label: label,
-                    rx: Double(count.rx),
-                    tx: Double(count.tx)
-                ))
-                totalRx += count.rx
-                totalTx += count.tx
-                peak = max(peak, count.total)
-            }
-            chartPoints = points
-            summaryDownload = Self.formatBytes(totalRx)
-            summaryUpload = Self.formatBytes(totalTx)
-            summaryTotal = Self.formatBytes(totalRx + totalTx)
-            summaryPeak = "\(Self.formatBytes(peak))"
-
-        case .daily:
-            let cal = Calendar.current
-            let now = Date()
-            var points: [ChartBarPoint] = []
-            let keyFormatter = DateFormatter()
-            keyFormatter.dateFormat = "yyyy-MM-dd"
-            let labelFormatter = DateFormatter()
-            labelFormatter.dateFormat = "d MMM"
-
-            var totalRx: UInt64 = 0
-            var totalTx: UInt64 = 0
-            var peak: UInt64 = 0
-
-            for i in (0..<14).reversed() {
-                guard let d = cal.date(byAdding: .day, value: -i, to: now) else { continue }
-                let key = keyFormatter.string(from: d)
-                let rec = database.days[key]
-                let rx = rec?.internet.rx ?? 0
-                let tx = rec?.internet.tx ?? 0
-                let tot = rx + tx
-
-                points.append(ChartBarPoint(
-                    index: 13 - i,
-                    label: i == 0 ? "Today" : labelFormatter.string(from: d),
-                    rx: Double(rx),
-                    tx: Double(tx)
-                ))
-                totalRx += rx
-                totalTx += tx
-                peak = max(peak, tot)
-            }
-            chartPoints = points
-            summaryDownload = Self.formatBytes(totalRx)
-            summaryUpload = Self.formatBytes(totalTx)
-            summaryTotal = Self.formatBytes(totalRx + totalTx)
-            summaryPeak = "\(Self.formatBytes(peak))"
-
-        case .weekly:
-            let cal = Calendar.current
-            let now = Date()
-            var points: [ChartBarPoint] = []
-            let keyFormatter = DateFormatter()
-            keyFormatter.dateFormat = "yyyy-MM-dd"
-
-            var totalRx: UInt64 = 0
-            var totalTx: UInt64 = 0
-            var peak: UInt64 = 0
-
-            for w in (0..<8).reversed() {
-                guard let weekStart = cal.date(byAdding: .weekOfYear, value: -w, to: now) else { continue }
-                var weekRx: UInt64 = 0
-                var weekTx: UInt64 = 0
-
-                for dayOffset in 0..<7 {
-                    if let dayDate = cal.date(byAdding: .day, value: dayOffset, to: weekStart) {
-                        let k = keyFormatter.string(from: dayDate)
-                        if let r = database.days[k] {
-                            weekRx += r.internet.rx
-                            weekTx += r.internet.tx
+        var result: [String: ByteCounters] = [:]
+        buf.withUnsafeBytes { raw in
+            var offset = 0
+            while offset + MemoryLayout<if_msghdr>.size <= len {
+                let hdr = raw.loadUnaligned(fromByteOffset: offset, as: if_msghdr.self)
+                let msgLen = Int(hdr.ifm_msglen)
+                if msgLen <= 0 { break }
+                if Int32(hdr.ifm_type) == RTM_IFINFO2, offset + MemoryLayout<if_msghdr2>.size <= len {
+                    let h2 = raw.loadUnaligned(fromByteOffset: offset, as: if_msghdr2.self)
+                    let flags = Int32(h2.ifm_flags)
+                    if (flags & Int32(IFF_UP)) != 0, (flags & Int32(IFF_LOOPBACK)) == 0 {
+                        var nameBuf = [CChar](repeating: 0, count: Int(IF_NAMESIZE))
+                        if if_indextoname(UInt32(h2.ifm_index), &nameBuf) != nil {
+                            let name = String(cString: nameBuf)
+                            if name.hasPrefix("en") || name.hasPrefix("utun") {
+                                result[name] = ByteCounters(rx: h2.ifm_data.ifi_ibytes, tx: h2.ifm_data.ifi_obytes)
+                            }
                         }
                     }
                 }
-                let label = w == 0 ? "This Week" : "\(w)w ago"
-                points.append(ChartBarPoint(
-                    index: 7 - w,
-                    label: label,
-                    rx: Double(weekRx),
-                    tx: Double(weekTx)
-                ))
-                totalRx += weekRx
-                totalTx += weekTx
-                peak = max(peak, weekRx + weekTx)
+                offset += msgLen
             }
-            chartPoints = points
-            summaryDownload = Self.formatBytes(totalRx)
-            summaryUpload = Self.formatBytes(totalTx)
-            summaryTotal = Self.formatBytes(totalRx + totalTx)
-            summaryPeak = "\(Self.formatBytes(peak))"
-
-        case .monthly:
-            let cal = Calendar.current
-            let now = Date()
-            var points: [ChartBarPoint] = []
-            let monthPrefixFormatter = DateFormatter()
-            monthPrefixFormatter.dateFormat = "yyyy-MM"
-            let monthLabelFormatter = DateFormatter()
-            monthLabelFormatter.dateFormat = "MMM"
-
-            var totalRx: UInt64 = 0
-            var totalTx: UInt64 = 0
-            var peak: UInt64 = 0
-
-            for m in (0..<6).reversed() {
-                guard let mDate = cal.date(byAdding: .month, value: -m, to: now) else { continue }
-                let prefix = monthPrefixFormatter.string(from: mDate)
-                var mRx: UInt64 = 0
-                var mTx: UInt64 = 0
-
-                for (k, record) in database.days {
-                    if k.hasPrefix(prefix) {
-                        mRx += record.internet.rx
-                        mTx += record.internet.tx
-                    }
-                }
-                let label = m == 0 ? "This Month" : monthLabelFormatter.string(from: mDate)
-                points.append(ChartBarPoint(
-                    index: 5 - m,
-                    label: label,
-                    rx: Double(mRx),
-                    tx: Double(mTx)
-                ))
-                totalRx += mRx
-                totalTx += mTx
-                peak = max(peak, mRx + mTx)
-            }
-            chartPoints = points
-            summaryDownload = Self.formatBytes(totalRx)
-            summaryUpload = Self.formatBytes(totalTx)
-            summaryTotal = Self.formatBytes(totalRx + totalTx)
-            summaryPeak = "\(Self.formatBytes(peak))"
-        }
-    }
-
-    private func computeMinuteSummary() {
-        var peakSpeed: Double = 0
-        var sumRx: Double = 0
-        var sumTx: Double = 0
-
-        for pt in minutePoints {
-            peakSpeed = max(peakSpeed, pt.totalSpeed)
-            sumRx += pt.rxSpeed
-            sumTx += pt.txSpeed
-        }
-        summaryDownload = "\(Self.formatCompact(speedRX))/s"
-        summaryUpload = "\(Self.formatCompact(speedTX))/s"
-        summaryTotal = Self.formatBytes(UInt64(sumRx + sumTx))
-        summaryPeak = "\(Self.formatCompact(UInt64(peakSpeed)))/s"
-    }
-
-    // MARK: - Network Snapshot
-    nonisolated static func captureSnapshot() -> [String: ByteCounters] {
-        var first: UnsafeMutablePointer<ifaddrs>?
-        guard getifaddrs(&first) == 0, let head = first else { return [:] }
-        defer { freeifaddrs(head) }
-
-        var result: [String: ByteCounters] = [:]
-        var cursor: UnsafeMutablePointer<ifaddrs>? = head
-
-        while let node = cursor {
-            cursor = node.pointee.ifa_next
-            let item = node.pointee
-
-            guard
-                let address = item.ifa_addr,
-                address.pointee.sa_family == UInt8(AF_LINK),
-                let namePtr = item.ifa_name,
-                let data = item.ifa_data
-            else { continue }
-
-            let flags = Int32(item.ifa_flags)
-            guard (flags & Int32(IFF_LOOPBACK)) == 0, (flags & Int32(IFF_UP)) != 0 else { continue }
-
-            let name = String(cString: namePtr)
-            guard name.hasPrefix("en") || name.hasPrefix("utun") else { continue }
-
-            let stats = data.assumingMemoryBound(to: if_data.self).pointee
-            result[name] = ByteCounters(
-                rx: UInt64(stats.ifi_ibytes),
-                tx: UInt64(stats.ifi_obytes)
-            )
         }
         return result
     }
 
-    // MARK: - Persistence
-    private static func storageURL() -> URL {
-        let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
-        let dir = appSupport.appendingPathComponent("NetPulse", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        return dir.appendingPathComponent("traffic_v2.json")
-    }
-
-    private static func currentDateKey() -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
-        return formatter.string(from: Date())
-    }
-
-    private static func currentHourKey() -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "HH"
-        return formatter.string(from: Date())
-    }
-
-    private func checkDayRollover() {
-        let key = Self.currentDateKey()
-        if let currentRec = database.days[key] {
-            todayInternet = currentRec.internet
-            todayVPN = currentRec.vpn
-            if let savedApps = currentRec.appUsage {
-                appCumulativeUsage = savedApps
-            }
-        } else {
-            todayInternet = ByteCounters()
-            todayVPN = ByteCounters()
-            appCumulativeUsage = [:]
-            database.days[key] = DayRecord(
-                dateKey: key,
-                internet: ByteCounters(),
-                vpn: ByteCounters(),
-                hourly: [:],
-                appUsage: [:]
-            )
-            saveDatabase()
+    /// utun interfaces that carry an IPv4 address = real VPN tunnels.
+    /// (Link-local-only utuns used by the OS, e.g. Private Relay helpers, are ignored.)
+    nonisolated static func tunnelInterfaces() -> Set<String> {
+        var first: UnsafeMutablePointer<ifaddrs>?
+        guard getifaddrs(&first) == 0, let head = first else { return [] }
+        defer { freeifaddrs(head) }
+        var names = Set<String>()
+        var cursor: UnsafeMutablePointer<ifaddrs>? = head
+        while let node = cursor {
+            cursor = node.pointee.ifa_next
+            guard let addr = node.pointee.ifa_addr,
+                  addr.pointee.sa_family == UInt8(AF_INET),
+                  let namePtr = node.pointee.ifa_name,
+                  (Int32(node.pointee.ifa_flags) & Int32(IFF_UP)) != 0 else { continue }
+            let name = String(cString: namePtr)
+            if name.hasPrefix("utun") { names.insert(name) }
         }
+        return names
+    }
+
+    // MARK: Persistence
+
+    private static func supportDir() -> URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
+        let dir = base.appendingPathComponent("NetPulse", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        return dir
+    }
+    private static func storageURL() -> URL { supportDir().appendingPathComponent("traffic_v3.json") }
+
+    /// Old builds seeded 30 days of random numbers into traffic_v2.json. Remove it.
+    private func purgeLegacySampleData() {
+        try? FileManager.default.removeItem(at: Self.supportDir().appendingPathComponent("traffic_v2.json"))
     }
 
     private func loadDatabase() {
-        let url = Self.storageURL()
-        if let data = try? Data(contentsOf: url),
-           let db = try? JSONDecoder().decode(TrafficDatabase.self, from: data),
-           !db.days.isEmpty {
-            self.database = db
-        } else {
-            seedRealisticData()
+        if let data = try? Data(contentsOf: Self.storageURL()),
+           let db = try? JSONDecoder().decode(TrafficDatabase.self, from: data) {
+            database = db
         }
-
-        let todayKey = Self.currentDateKey()
-        if let rec = database.days[todayKey] {
+        // keep ~13 months
+        if let cutoff = Calendar.current.date(byAdding: .day, value: -400, to: Date()) {
+            let ck = Fmt.dayKey(cutoff)
+            database.days = database.days.filter { $0.key >= ck }
+        }
+        if let rec = database.days[Fmt.dayKey(Date())] {
             todayInternet = rec.internet
             todayVPN = rec.vpn
-            if let savedApps = rec.appUsage {
-                appCumulativeUsage = savedApps
-            }
-        } else {
-            database.days[todayKey] = DayRecord(
-                dateKey: todayKey,
-                internet: ByteCounters(),
-                vpn: ByteCounters(),
-                hourly: [:],
-                appUsage: [:]
-            )
         }
     }
 
     func saveDatabase() {
-        let todayKey = Self.currentDateKey()
-        if var rec = database.days[todayKey] {
-            rec.internet = todayInternet
-            rec.vpn = todayVPN
-            rec.appUsage = appCumulativeUsage
-            database.days[todayKey] = rec
-        }
-
         if let data = try? JSONEncoder().encode(database) {
             try? data.write(to: Self.storageURL(), options: .atomic)
         }
@@ -816,634 +648,367 @@ final class NetworkMonitor: ObservableObject {
         database = TrafficDatabase(days: [:])
         todayInternet = ByteCounters()
         todayVPN = ByteCounters()
-        appCumulativeUsage = [:]
-        appLiveSpeeds = [:]
-        previousNettopRaw = [:]
-        topApps = []
-        minutePoints = (0..<60).map { MinuteSpeedPoint(index: $0, rxSpeed: 0, txSpeed: 0) }
+        appSession = [:]
         saveDatabase()
         refreshChartData()
-    }
-
-    private func seedRealisticData() {
-        var days: [String: DayRecord] = [:]
-        let cal = Calendar.current
-        let now = Date()
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyy-MM-dd"
-
-        for d in 1...30 {
-            guard let pastDate = cal.date(byAdding: .day, value: -d, to: now) else { continue }
-            let key = formatter.string(from: pastDate)
-
-            let baseRx = UInt64.random(in: 1_200_000_000...5_500_000_000)
-            let baseTx = UInt64(Double(baseRx) * Double.random(in: 0.15...0.30))
-
-            var hourlyMap: [String: ByteCounters] = [:]
-            for h in 0..<24 {
-                let hKey = String(format: "%02d", h)
-                let weight = (h >= 9 && h <= 23) ? Double.random(in: 0.05...0.08) : Double.random(in: 0.005...0.02)
-                let hRx = UInt64(Double(baseRx) * weight)
-                let hTx = UInt64(Double(baseTx) * weight)
-                hourlyMap[hKey] = ByteCounters(rx: hRx, tx: hTx)
-            }
-
-            days[key] = DayRecord(
-                dateKey: key,
-                internet: ByteCounters(rx: baseRx, tx: baseTx),
-                vpn: ByteCounters(rx: baseRx / 3, tx: baseTx / 3),
-                hourly: hourlyMap,
-                appUsage: [:]
-            )
-        }
-        self.database = TrafficDatabase(days: days)
-        saveDatabase()
-    }
-
-    // MARK: - Formatters
-    nonisolated static func formatBytes(_ bytes: UInt64) -> String {
-        ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
-    }
-
-    nonisolated static func formatExactBytes(_ bytes: UInt64) -> String {
-        let formatter = NumberFormatter()
-        formatter.numberStyle = .decimal
-        let formatted = formatter.string(from: NSNumber(value: bytes)) ?? "\(bytes)"
-        return "\(formatted) B"
-    }
-
-    nonisolated static func formatCompact(_ bytes: UInt64) -> String {
-        let kb = Double(bytes) / 1000.0
-        let mb = kb / 1000.0
-        let gb = mb / 1000.0
-        if gb >= 1.0 { return String(format: "%.2f GB", gb) }
-        if mb >= 1.0 { return String(format: "%.1f MB", mb) }
-        if kb >= 1.0 { return String(format: "%.0f KB", kb) }
-        return "\(bytes) B"
-    }
-
-    nonisolated static func formatSpeed(_ bytesPerSec: Double) -> String {
-        let bytes = UInt64(max(0, bytesPerSec))
-        return "\(formatCompact(bytes))/s"
+        rebuildApps()
     }
 }
 
-// MARK: - User Interface Views
+// MARK: - Reusable UI pieces
+
+enum Theme {
+    static let rx = Color.cyan
+    static let tx = Color.purple
+}
+
+extension View {
+    func glassCard(radius: CGFloat = 14) -> some View {
+        self
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: radius))
+            .overlay(RoundedRectangle(cornerRadius: radius).strokeBorder(Color.white.opacity(0.08), lineWidth: 0.8))
+    }
+}
+
+struct PillBar<Item: Hashable>: View {
+    let items: [Item]
+    @Binding var selection: Item
+    let title: (Item) -> String
+    var icon: ((Item) -> String)? = nil
+    var fontSize: CGFloat = 11
+
+    var body: some View {
+        HStack(spacing: 3) {
+            ForEach(items, id: \.self) { item in
+                Button {
+                    withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) { selection = item }
+                } label: {
+                    HStack(spacing: 4) {
+                        if let icon = icon {
+                            Image(systemName: icon(item)).font(.system(size: fontSize - 2, weight: .semibold))
+                        }
+                        Text(title(item)).font(.system(size: fontSize, weight: .semibold))
+                    }
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 5)
+                    .background {
+                        if selection == item {
+                            Capsule()
+                                .fill(LinearGradient(colors: [.blue, .indigo], startPoint: .topLeading, endPoint: .bottomTrailing))
+                                .shadow(color: Color.blue.opacity(0.4), radius: 4, y: 1)
+                        }
+                    }
+                    .foregroundStyle(selection == item ? Color.white : Color.secondary)
+                    .contentShape(Capsule())
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .padding(2.5)
+        .background(.ultraThinMaterial, in: Capsule())
+        .overlay(Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 0.8))
+    }
+}
+
+struct PulsingDot: View {
+    let color: Color
+
+    var body: some View {
+        TimelineView(.periodic(from: .now, by: 0.1)) { timeline in
+            let phase = timeline.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.5) / 1.5
+            Circle()
+                .fill(color)
+                .frame(width: 7, height: 7)
+                .overlay(
+                    Circle()
+                        .stroke(color.opacity(max(0, 0.8 - phase * 0.8)), lineWidth: 1.2)
+                        .scaleEffect(1.0 + CGFloat(phase) * 1.6)
+                )
+                .shadow(color: color.opacity(0.8), radius: 3)
+        }
+    }
+}
+
+// MARK: - Dashboard
 
 struct DashboardView: View {
     @ObservedObject var monitor: NetworkMonitor
 
     var body: some View {
         ZStack {
-            // Ambient backdrop glows
             GeometryReader { geo in
-                Circle()
-                    .fill(Color.blue.opacity(0.12))
-                    .frame(width: 220, height: 220)
-                    .blur(radius: 60)
-                    .offset(x: -40, y: -40)
-
-                Circle()
-                    .fill(Color.purple.opacity(0.10))
-                    .frame(width: 200, height: 200)
-                    .blur(radius: 50)
-                    .offset(x: geo.size.width - 130, y: 150)
+                Circle().fill(Color.blue.opacity(0.12)).frame(width: 220, height: 220)
+                    .blur(radius: 60).offset(x: -40, y: -40)
+                Circle().fill(Color.purple.opacity(0.10)).frame(width: 200, height: 200)
+                    .blur(radius: 50).offset(x: geo.size.width - 130, y: 150)
             }
+            .allowsHitTesting(false)
 
             VStack(spacing: 12) {
-                // Header Bar
                 HeaderView(monitor: monitor)
 
-                // Custom Pill Segmented Tab Navigation
-                HStack(spacing: 4) {
-                    ForEach(ActiveTab.allCases) { tab in
-                        Button {
-                            withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
-                                monitor.activeTab = tab
-                            }
-                        } label: {
-                            HStack(spacing: 6) {
-                                Image(systemName: tab.icon)
-                                    .font(.system(size: 11, weight: .semibold))
-                                Text(tab.rawValue)
-                                    .font(.system(size: 12, weight: .semibold))
-                            }
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 6)
-                            .background {
-                                if monitor.activeTab == tab {
-                                    RoundedRectangle(cornerRadius: 8)
-                                        .fill(Color.accentColor.opacity(0.22))
-                                        .overlay(
-                                            RoundedRectangle(cornerRadius: 8)
-                                                .strokeBorder(Color.accentColor.opacity(0.4), lineWidth: 1)
-                                        )
-                                } else {
-                                    Color.clear
-                                }
-                            }
-                            .foregroundStyle(monitor.activeTab == tab ? Color.primary : Color.secondary)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(3)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 11))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 11)
-                        .strokeBorder(Color.white.opacity(0.08), lineWidth: 0.8)
-                )
+                PillBar(items: ActiveTab.allCases, selection: $monitor.activeTab,
+                        title: { $0.rawValue }, icon: { $0.icon }, fontSize: 12)
 
-                // Dynamic Body Content
                 Group {
                     switch monitor.activeTab {
-                    case .charts:
-                        ChartsTabView(monitor: monitor)
-                    case .apps:
-                        AppsTabView(monitor: monitor)
-                    case .overview:
-                        OverviewTabView(monitor: monitor)
+                    case .charts: ChartsTabView(monitor: monitor)
+                    case .apps: AppsTabView(monitor: monitor)
+                    case .overview: OverviewTabView(monitor: monitor)
                     }
                 }
 
-                Divider()
-                    .opacity(0.6)
-
-                // Footer
+                Divider().opacity(0.6)
                 FooterView(monitor: monitor)
             }
             .padding(14)
         }
         .frame(width: 440)
         .background(.ultraThinMaterial)
+        .onAppear {
+            monitor.popoverVisible = true
+            monitor.refreshChartData()
+        }
+        .onDisappear {
+            monitor.popoverVisible = false
+            monitor.endHover()
+            monitor.saveDatabase()
+        }
     }
 }
 
-// MARK: - Header
 struct HeaderView: View {
     @ObservedObject var monitor: NetworkMonitor
 
     var body: some View {
         HStack(spacing: 10) {
-            // Glowing ECG Logo
             ZStack {
                 RoundedRectangle(cornerRadius: 9)
-                    .fill(
-                        LinearGradient(
-                            colors: [Color.blue.opacity(0.3), Color.purple.opacity(0.2)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
+                    .fill(LinearGradient(colors: [Color.blue.opacity(0.3), Color.purple.opacity(0.2)],
+                                         startPoint: .topLeading, endPoint: .bottomTrailing))
                     .frame(width: 34, height: 34)
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 9)
-                            .strokeBorder(Color.blue.opacity(0.4), lineWidth: 1)
-                    )
-
+                    .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Color.blue.opacity(0.4), lineWidth: 1))
                 Image(systemName: "waveform.path.ecg")
                     .font(.system(size: 16, weight: .bold))
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [Color.cyan, Color.blue],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
+                    .foregroundStyle(LinearGradient(colors: [.cyan, .blue], startPoint: .top, endPoint: .bottom))
             }
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack(spacing: 6) {
-                    Text("NetPulse")
-                        .font(.system(size: 15, weight: .bold, design: .rounded))
+                    Text("NetPulse").font(.system(size: 15, weight: .bold, design: .rounded))
                     Text("PRO")
                         .font(.system(size: 9, weight: .heavy, design: .rounded))
-                        .padding(.horizontal, 5)
-                        .padding(.vertical, 1.5)
-                        .background(
-                            LinearGradient(
-                                colors: [Color.blue.opacity(0.3), Color.purple.opacity(0.3)],
-                                startPoint: .leading,
-                                endPoint: .trailing
-                            ),
-                            in: Capsule()
-                        )
-                        .overlay(
-                            Capsule().strokeBorder(Color.blue.opacity(0.5), lineWidth: 0.8)
-                        )
+                        .padding(.horizontal, 5).padding(.vertical, 1.5)
+                        .background(LinearGradient(colors: [Color.blue.opacity(0.3), Color.purple.opacity(0.3)],
+                                                   startPoint: .leading, endPoint: .trailing), in: Capsule())
+                        .overlay(Capsule().strokeBorder(Color.blue.opacity(0.5), lineWidth: 0.8))
                 }
-                Text("Intelligent Network & Traffic Monitor")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.secondary)
+                Text("Live network & traffic monitor")
+                    .font(.system(size: 10)).foregroundStyle(.secondary)
             }
 
             Spacer()
 
-            // Live Connection Badge with pulsing LED
-            HStack(spacing: 6) {
-                Circle()
-                    .fill(monitor.isVPNActive ? Color.green : Color.cyan)
-                    .frame(width: 7, height: 7)
-                    .shadow(color: monitor.isVPNActive ? Color.green.opacity(0.8) : Color.cyan.opacity(0.8), radius: 4)
-
-                Text(monitor.isVPNActive ? "VPN Protected" : "Direct (en0)")
+            HStack(spacing: 7) {
+                PulsingDot(color: monitor.vpnActive ? .green : .cyan)
+                Text(monitor.vpnActive ? "VPN · \(monitor.vpnName ?? "tunnel")" : "Direct")
                     .font(.system(size: 10, weight: .medium))
-                    .foregroundStyle(.primary)
             }
-            .padding(.horizontal, 9)
-            .padding(.vertical, 5)
+            .padding(.horizontal, 10).padding(.vertical, 5)
             .background(.regularMaterial, in: Capsule())
-            .overlay(
-                Capsule().strokeBorder(Color.white.opacity(0.12), lineWidth: 0.8)
-            )
+            .overlay(Capsule().strokeBorder(Color.white.opacity(0.12), lineWidth: 0.8))
         }
     }
 }
 
-// MARK: - Charts Tab
+// MARK: - Charts tab
+
 struct ChartsTabView: View {
     @ObservedObject var monitor: NetworkMonitor
 
     var body: some View {
         VStack(spacing: 10) {
-            // Modern Scope Pills: Minute | Hourly | Daily | Weekly | Monthly
-            HStack(spacing: 3) {
-                ForEach(TimeScope.allCases) { scope in
-                    Button {
-                        withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
-                            monitor.selectedScope = scope
-                        }
-                    } label: {
-                        HStack(spacing: 4) {
-                            Image(systemName: scope.icon)
-                                .font(.system(size: 9))
-                            Text(scope.rawValue)
-                                .font(.system(size: 11, weight: .medium))
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 5)
-                        .background {
-                            if monitor.selectedScope == scope {
-                                Capsule()
-                                    .fill(
-                                        LinearGradient(
-                                            colors: [Color.blue, Color.indigo],
-                                            startPoint: .topLeading,
-                                            endPoint: .bottomTrailing
-                                        )
-                                    )
-                                    .shadow(color: Color.blue.opacity(0.4), radius: 4, y: 1)
-                            } else {
-                                Color.clear
-                            }
-                        }
-                        .foregroundStyle(monitor.selectedScope == scope ? Color.white : Color.secondary)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .padding(2.5)
-            .background(.ultraThinMaterial, in: Capsule())
-            .overlay(
-                Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 0.8)
-            )
+            PillBar(items: TimeScope.allCases, selection: $monitor.selectedScope,
+                    title: { $0.rawValue }, icon: { $0.icon })
 
-            // Filter bar: All | Download | Upload + Live Speed Indicators
             HStack {
-                HStack(spacing: 2) {
-                    ForEach(ChartFilter.allCases) { filter in
-                        Button {
-                            withAnimation(.easeInOut(duration: 0.15)) {
-                                monitor.selectedFilter = filter
-                            }
-                        } label: {
-                            Text(filter.rawValue)
-                                .font(.system(size: 10, weight: monitor.selectedFilter == filter ? .semibold : .regular))
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 3)
-                                .background {
-                                    if monitor.selectedFilter == filter {
-                                        RoundedRectangle(cornerRadius: 6)
-                                            .fill(Color.primary.opacity(0.12))
-                                    }
-                                }
-                                .foregroundStyle(monitor.selectedFilter == filter ? Color.primary : Color.secondary)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(2)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
-
+                PillBar(items: ChartFilter.allCases, selection: $monitor.selectedFilter,
+                        title: { $0.rawValue }, fontSize: 10)
+                    .frame(width: 200)
                 Spacer()
-
-                // Realtime speed ticker
                 HStack(spacing: 8) {
-                    HStack(spacing: 3) {
-                        Image(systemName: "arrow.down")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(.cyan)
-                        Text(NetworkMonitor.formatCompact(monitor.speedRX) + "/s")
-                            .foregroundStyle(.cyan)
-                    }
-                    HStack(spacing: 3) {
-                        Image(systemName: "arrow.up")
-                            .font(.system(size: 9, weight: .bold))
-                            .foregroundStyle(.purple)
-                        Text(NetworkMonitor.formatCompact(monitor.speedTX) + "/s")
-                            .foregroundStyle(.purple)
-                    }
+                    Label(Fmt.speed(monitor.speedRX), systemImage: "arrow.down").foregroundStyle(Theme.rx)
+                    Label(Fmt.speed(monitor.speedTX), systemImage: "arrow.up").foregroundStyle(Theme.tx)
                 }
+                .labelStyle(CompactLabelStyle())
                 .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
+                .padding(.horizontal, 8).padding(.vertical, 4)
                 .background(.ultraThinMaterial, in: Capsule())
-                .overlay(
-                    Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 0.8)
-                )
+                .overlay(Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 0.8))
             }
 
-            // Summary Metric Cards Grid (2x2) with Hover-Inspection Support
             SummaryGrid(monitor: monitor)
 
-            // Interactive Chart Card with Exact Hover Callouts
             VStack(alignment: .leading, spacing: 8) {
-                // Chart Card Header
                 HStack {
                     HStack(spacing: 5) {
-                        Image(systemName: "chart.xyaxis.line")
-                            .foregroundStyle(.blue)
-                            .font(.caption)
-                        Text(monitor.selectedScope.titleEnglish)
-                            .font(.system(size: 11, weight: .bold))
-                            .foregroundStyle(.secondary)
+                        Image(systemName: "chart.xyaxis.line").foregroundStyle(.blue).font(.caption)
+                        Text(monitor.selectedScope.title)
+                            .font(.system(size: 11, weight: .bold)).foregroundStyle(.secondary)
                     }
-
                     Spacer()
-
-                    // Legend
                     HStack(spacing: 10) {
-                        HStack(spacing: 4) {
-                            Circle().fill(Color.cyan).frame(width: 6, height: 6)
-                            Text("Download").font(.system(size: 10)).foregroundStyle(.secondary)
-                        }
-                        HStack(spacing: 4) {
-                            Circle().fill(Color.purple).frame(width: 6, height: 6)
-                            Text("Upload").font(.system(size: 10)).foregroundStyle(.secondary)
-                        }
+                        HStack(spacing: 4) { Circle().fill(Theme.rx).frame(width: 6, height: 6)
+                            Text("Download").font(.system(size: 10)).foregroundStyle(.secondary) }
+                        HStack(spacing: 4) { Circle().fill(Theme.tx).frame(width: 6, height: 6)
+                            Text("Upload").font(.system(size: 10)).foregroundStyle(.secondary) }
                     }
                 }
 
-                // Hover Inspection Banner (Displays Exact Numbers when mouse is over chart)
                 InspectionBanner(monitor: monitor)
 
-                // The Chart View
                 if monitor.selectedScope == .minute {
-                    LiveMinuteChart(monitor: monitor)
+                    LiveChart(monitor: monitor)
                 } else {
                     HistoricalBarChart(monitor: monitor)
                 }
             }
             .padding(12)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
-            .overlay(
-                RoundedRectangle(cornerRadius: 14)
-                    .strokeBorder(Color.white.opacity(0.09), lineWidth: 1)
-            )
+            .glassCard()
             .shadow(color: Color.black.opacity(0.15), radius: 8, y: 3)
         }
     }
 }
 
-// MARK: - Inspection Banner (Shows exact number on hover)
+struct CompactLabelStyle: LabelStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HStack(spacing: 3) {
+            configuration.icon.font(.system(size: 9, weight: .bold))
+            configuration.title
+        }
+    }
+}
+
 struct InspectionBanner: View {
     @ObservedObject var monitor: NetworkMonitor
 
     var body: some View {
         Group {
-            if monitor.selectedScope == .minute, let pt = monitor.hoveredMinutePoint {
-                HStack(spacing: 8) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "cursorarrow.rays")
-                            .font(.system(size: 9))
-                            .foregroundStyle(.yellow)
-                        Text("\(59 - pt.index)s ago:")
-                            .font(.system(size: 10, weight: .bold))
-                    }
-
-                    Spacer()
-
-                    HStack(spacing: 8) {
-                        Text("↓ \(NetworkMonitor.formatSpeed(pt.rxSpeed))")
-                            .foregroundStyle(.cyan)
-                        Text("↑ \(NetworkMonitor.formatSpeed(pt.txSpeed))")
-                            .foregroundStyle(.purple)
-                        Text("Total: \(NetworkMonitor.formatSpeed(pt.totalSpeed))")
-                            .fontWeight(.bold)
-                    }
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(Color.blue.opacity(0.12), in: RoundedRectangle(cornerRadius: 7))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 7)
-                        .strokeBorder(Color.blue.opacity(0.3), lineWidth: 0.8)
-                )
-            } else if let pt = monitor.hoveredBarPoint {
-                HStack(spacing: 8) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "cursorarrow.rays")
-                            .font(.system(size: 9))
-                            .foregroundStyle(.yellow)
-                        Text("\(pt.label):")
-                            .font(.system(size: 10, weight: .bold))
-                    }
-
-                    Spacer()
-
-                    HStack(spacing: 8) {
-                        Text("↓ \(NetworkMonitor.formatCompact(UInt64(pt.rx)))")
-                            .foregroundStyle(.cyan)
-                        Text("↑ \(NetworkMonitor.formatCompact(UInt64(pt.tx)))")
-                            .foregroundStyle(.purple)
-                        Text("Total: \(NetworkMonitor.formatCompact(UInt64(pt.total)))")
-                            .fontWeight(.bold)
-                    }
-                    .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                }
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(Color.purple.opacity(0.12), in: RoundedRectangle(cornerRadius: 7))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 7)
-                        .strokeBorder(Color.purple.opacity(0.3), lineWidth: 0.8)
-                )
+            if monitor.selectedScope == .minute, let s = monitor.hoveredSample {
+                row(title: "\(max(0, Int((monitor.displaySamples.last?.time ?? s.time).timeIntervalSince(s.time).rounded())))s ago",
+                    rx: Fmt.speed(s.rx), tx: Fmt.speed(s.tx), total: Fmt.speed(s.total), tint: .blue)
+            } else if monitor.selectedScope != .minute, let b = monitor.hoveredBar {
+                row(title: b.label, rx: Fmt.bytes(b.rx), tx: Fmt.bytes(b.tx), total: Fmt.bytes(b.total), tint: .purple)
             } else {
-                HStack {
-                    Image(systemName: "hand.tap")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.secondary)
-                    Text("Hover over chart to inspect precise data")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.tertiary)
+                HStack(spacing: 5) {
+                    Image(systemName: "cursorarrow.motionlines").font(.system(size: 9)).foregroundStyle(.secondary)
+                    Text("Hover over the chart to inspect exact values")
+                        .font(.system(size: 10)).foregroundStyle(.tertiary)
                     Spacer()
                 }
-                .padding(.horizontal, 4)
-                .frame(height: 22)
+                .padding(.horizontal, 4).frame(height: 22)
             }
         }
     }
+
+    private func row(title: String, rx: String, tx: String, total: String, tint: Color) -> some View {
+        HStack(spacing: 8) {
+            Text(title).font(.system(size: 10, weight: .bold))
+            Spacer()
+            Text("↓ \(rx)").foregroundStyle(Theme.rx)
+            Text("↑ \(tx)").foregroundStyle(Theme.tx)
+            Text("Σ \(total)").fontWeight(.bold)
+        }
+        .font(.system(size: 10, weight: .semibold, design: .monospaced))
+        .padding(.horizontal, 10).padding(.vertical, 5)
+        .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 7))
+        .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(tint.opacity(0.3), lineWidth: 0.8))
+    }
 }
 
-// MARK: - Live Minute Chart with Hover Inspection
-struct LiveMinuteChart: View {
+struct LiveChart: View {
     @ObservedObject var monitor: NetworkMonitor
 
     var body: some View {
+        let data = monitor.displaySamples
+        let end = data.last?.time ?? Date()
+        let start = end.addingTimeInterval(-59)
+        let peak = data.map { max($0.rx, $0.tx) }.max() ?? 0
+        let ymax = max(peak * 1.25, 20_000)
+        let showDL = monitor.selectedFilter != .upload
+        let showUL = monitor.selectedFilter != .download
+
         Chart {
-            ForEach(monitor.minutePoints) { p in
-                if monitor.selectedFilter == .all || monitor.selectedFilter == .download {
-                    AreaMark(
-                        x: .value("Seconds", p.index),
-                        y: .value("Download", p.rxSpeed)
-                    )
-                    .interpolationMethod(.catmullRom)
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [Color.cyan.opacity(0.4), Color.blue.opacity(0.15), Color.clear],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
-
-                    LineMark(
-                        x: .value("Seconds", p.index),
-                        y: .value("Download", p.rxSpeed)
-                    )
-                    .interpolationMethod(.catmullRom)
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [Color.cyan, Color.blue],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
-                    )
-                    .lineStyle(StrokeStyle(lineWidth: 2))
+            ForEach(data) { p in
+                if showDL {
+                    AreaMark(x: .value("Time", p.time), y: .value("Speed", p.rx),
+                             series: .value("Series", "Download"), stacking: .unstacked)
+                        .interpolationMethod(.monotone)
+                        .foregroundStyle(LinearGradient(colors: [Theme.rx.opacity(0.4), Color.blue.opacity(0.12), .clear],
+                                                        startPoint: .top, endPoint: .bottom))
+                    LineMark(x: .value("Time", p.time), y: .value("Speed", p.rx),
+                             series: .value("Series", "Download"))
+                        .interpolationMethod(.monotone)
+                        .foregroundStyle(LinearGradient(colors: [Theme.rx, .blue], startPoint: .leading, endPoint: .trailing))
+                        .lineStyle(StrokeStyle(lineWidth: 2))
                 }
-
-                if monitor.selectedFilter == .all || monitor.selectedFilter == .upload {
-                    AreaMark(
-                        x: .value("Seconds", p.index),
-                        y: .value("Upload", p.txSpeed)
-                    )
-                    .interpolationMethod(.catmullRom)
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [Color.purple.opacity(0.35), Color.pink.opacity(0.1), Color.clear],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
-
-                    LineMark(
-                        x: .value("Seconds", p.index),
-                        y: .value("Upload", p.txSpeed)
-                    )
-                    .interpolationMethod(.catmullRom)
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [Color.purple, Color.pink],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
-                    )
-                    .lineStyle(StrokeStyle(lineWidth: 1.5))
+                if showUL {
+                    AreaMark(x: .value("Time", p.time), y: .value("Speed", p.tx),
+                             series: .value("Series", "Upload"), stacking: .unstacked)
+                        .interpolationMethod(.monotone)
+                        .foregroundStyle(LinearGradient(colors: [Theme.tx.opacity(0.35), Color.pink.opacity(0.1), .clear],
+                                                        startPoint: .top, endPoint: .bottom))
+                    LineMark(x: .value("Time", p.time), y: .value("Speed", p.tx),
+                             series: .value("Series", "Upload"))
+                        .interpolationMethod(.monotone)
+                        .foregroundStyle(LinearGradient(colors: [Theme.tx, .pink], startPoint: .leading, endPoint: .trailing))
+                        .lineStyle(StrokeStyle(lineWidth: 1.5))
                 }
             }
 
-            // Hover Cursor
-            if let hovered = monitor.hoveredMinutePoint {
-                RuleMark(x: .value("Hover", hovered.index))
+            if let h = monitor.hoveredSample {
+                RuleMark(x: .value("Hover", h.time))
                     .foregroundStyle(Color.white.opacity(0.5))
                     .lineStyle(StrokeStyle(lineWidth: 1.2, dash: [3, 3]))
-                    .annotation(position: .top, spacing: 4) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("\(59 - hovered.index)s ago")
-                                .font(.system(size: 9, weight: .bold))
-                                .foregroundStyle(.secondary)
-                            Text("↓ \(NetworkMonitor.formatSpeed(hovered.rxSpeed))")
-                                .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                                .foregroundStyle(.cyan)
-                            Text("↑ \(NetworkMonitor.formatSpeed(hovered.txSpeed))")
-                                .font(.system(size: 9, weight: .semibold, design: .monospaced))
-                                .foregroundStyle(.purple)
-                        }
-                        .padding(5)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 6))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 6)
-                                .strokeBorder(Color.white.opacity(0.2), lineWidth: 0.8)
-                        )
-                        .shadow(color: Color.black.opacity(0.3), radius: 4)
-                    }
-
-                PointMark(
-                    x: .value("Hover", hovered.index),
-                    y: .value("HoverVal", hovered.rxSpeed)
-                )
-                .symbolSize(35)
-                .foregroundStyle(Color.cyan)
-
-                PointMark(
-                    x: .value("Hover", hovered.index),
-                    y: .value("HoverValTx", hovered.txSpeed)
-                )
-                .symbolSize(30)
-                .foregroundStyle(Color.purple)
+                if showDL {
+                    PointMark(x: .value("Hover", h.time), y: .value("Speed", h.rx))
+                        .symbolSize(40).foregroundStyle(Theme.rx)
+                }
+                if showUL {
+                    PointMark(x: .value("Hover", h.time), y: .value("Speed", h.tx))
+                        .symbolSize(34).foregroundStyle(Theme.tx)
+                }
             }
         }
+        .chartXScale(domain: start...end)
+        .chartYScale(domain: 0...ymax)
         .chartXAxis {
-            AxisMarks(values: [0, 15, 30, 45, 59]) { val in
-                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 2]))
-                    .foregroundStyle(Color.white.opacity(0.1))
-                AxisValueLabel {
-                    if let idx = val.as(Int.self) {
-                        Text("\(59 - idx)s")
-                            .font(.system(size: 9))
-                            .foregroundStyle(.secondary)
-                    }
-                }
+            AxisMarks(values: .stride(by: .second, count: 15)) { _ in
+                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 2])).foregroundStyle(Color.white.opacity(0.1))
+                AxisValueLabel(format: Date.FormatStyle.dateTime.hour().minute().second())
+                    .font(.system(size: 9))
             }
         }
         .chartYAxis {
-            AxisMarks(values: .automatic) { val in
-                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 2]))
-                    .foregroundStyle(Color.white.opacity(0.1))
+            AxisMarks(values: .automatic(desiredCount: 4)) { v in
+                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 2])).foregroundStyle(Color.white.opacity(0.1))
                 AxisValueLabel {
-                    if let bytes = val.as(Double.self) {
-                        Text(NetworkMonitor.formatSpeed(bytes))
-                            .font(.system(size: 9))
-                            .foregroundStyle(.secondary)
+                    if let b = v.as(Double.self) {
+                        Text(Fmt.speed(b)).font(.system(size: 9)).foregroundStyle(.secondary)
                     }
                 }
             }
         }
         .chartOverlay { proxy in
             GeometryReader { geo in
-                Rectangle()
-                    .fill(Color.clear)
-                    .contentShape(Rectangle())
+                Rectangle().fill(Color.clear).contentShape(Rectangle())
                     .onContinuousHover { phase in
                         switch phase {
                         case .active(let loc):
-                            let rel = max(0, min(0.999, loc.x / geo.size.width))
-                            let idx = Int(rel * 60)
-                            if idx >= 0 && idx < monitor.minutePoints.count {
-                                monitor.hoveredMinutePoint = monitor.minutePoints[idx]
-                            }
+                            let x = loc.x - geo[proxy.plotAreaFrame].origin.x
+                            if let date: Date = proxy.value(atX: x) { monitor.hover(sampleNear: date) }
                         case .ended:
-                            monitor.hoveredMinutePoint = nil
+                            monitor.endHover()
                         }
                     }
             }
@@ -1452,222 +1017,115 @@ struct LiveMinuteChart: View {
     }
 }
 
-// MARK: - Historical Bar Chart with Exact Hover Callouts
 struct HistoricalBarChart: View {
     @ObservedObject var monitor: NetworkMonitor
 
     var body: some View {
+        let bars = monitor.bars
+        let step = bars.count > 14 ? 4 : (bars.count > 8 ? 3 : 1)
+        let tickLabels = bars.filter { $0.id % step == 0 }.map(\.label)
+        let isEmpty = bars.allSatisfy { $0.total == 0 }
+
         Chart {
-            ForEach(monitor.chartPoints) { p in
-                let isHovered = monitor.hoveredBarPoint?.id == p.id
-                let isAnyHovered = monitor.hoveredBarPoint != nil
-
-                if monitor.selectedFilter == .all || monitor.selectedFilter == .download {
-                    BarMark(
-                        x: .value("Time", p.label),
-                        y: .value("Download", p.rx)
-                    )
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [Color.cyan, Color.blue],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
-                    .cornerRadius(5)
-                    .opacity(isAnyHovered ? (isHovered ? 1.0 : 0.35) : 0.95)
+            ForEach(bars) { p in
+                let dim = monitor.hoveredBarID != nil && monitor.hoveredBarID != p.id
+                if monitor.selectedFilter != .upload {
+                    BarMark(x: .value("Time", p.label), y: .value("Bytes", p.rx))
+                        .foregroundStyle(by: .value("Type", "Download"))
+                        .opacity(dim ? 0.35 : 1)
+                        .cornerRadius(3)
                 }
-
-                if monitor.selectedFilter == .all || monitor.selectedFilter == .upload {
-                    BarMark(
-                        x: .value("Time", p.label),
-                        y: .value("Upload", p.tx)
-                    )
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [Color.purple, Color.pink],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
-                    .cornerRadius(5)
-                    .opacity(isAnyHovered ? (isHovered ? 1.0 : 0.35) : 0.95)
+                if monitor.selectedFilter != .download {
+                    BarMark(x: .value("Time", p.label), y: .value("Bytes", p.tx))
+                        .foregroundStyle(by: .value("Type", "Upload"))
+                        .opacity(dim ? 0.35 : 1)
+                        .cornerRadius(3)
                 }
-            }
-
-            // Hover Cursor Line & Tooltip
-            if let hovered = monitor.hoveredBarPoint {
-                RuleMark(x: .value("Hover", hovered.label))
-                    .foregroundStyle(Color.white.opacity(0.45))
-                    .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 3]))
-                    .annotation(position: .top, spacing: 4) {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(hovered.label)
-                                .font(.system(size: 10, weight: .bold))
-                                .foregroundStyle(.primary)
-
-                            Divider().opacity(0.4)
-
-                            HStack(spacing: 8) {
-                                Text("Download:")
-                                    .foregroundStyle(.secondary)
-                                Text(NetworkMonitor.formatBytes(UInt64(hovered.rx)))
-                                    .foregroundStyle(.cyan)
-                                    .fontWeight(.bold)
-                            }
-                            .font(.system(size: 9, design: .monospaced))
-
-                            HStack(spacing: 8) {
-                                Text("Upload:")
-                                    .foregroundStyle(.secondary)
-                                Text(NetworkMonitor.formatBytes(UInt64(hovered.tx)))
-                                    .foregroundStyle(.purple)
-                                    .fontWeight(.bold)
-                            }
-                            .font(.system(size: 9, design: .monospaced))
-
-                            HStack(spacing: 8) {
-                                Text("Total:")
-                                    .foregroundStyle(.secondary)
-                                Text(NetworkMonitor.formatBytes(UInt64(hovered.total)))
-                                    .fontWeight(.heavy)
-                            }
-                            .font(.system(size: 9, design: .monospaced))
-                        }
-                        .padding(7)
-                        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 8))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 8)
-                                .strokeBorder(Color.white.opacity(0.2), lineWidth: 0.8)
-                        )
-                        .shadow(color: Color.black.opacity(0.4), radius: 6)
-                    }
             }
         }
+        .chartForegroundStyleScale(["Download": Theme.rx, "Upload": Theme.tx])
+        .chartLegend(.hidden)
         .chartXAxis {
-            AxisMarks(values: .automatic) { _ in
-                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 2]))
-                    .foregroundStyle(Color.white.opacity(0.1))
-                AxisValueLabel()
-                    .font(.system(size: 9))
-                    .foregroundStyle(.secondary)
+            AxisMarks(values: tickLabels) { _ in
+                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 2])).foregroundStyle(Color.white.opacity(0.1))
+                AxisValueLabel().font(.system(size: 9))
             }
         }
         .chartYAxis {
-            AxisMarks(values: .automatic) { val in
-                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 2]))
-                    .foregroundStyle(Color.white.opacity(0.1))
+            AxisMarks(values: .automatic(desiredCount: 4)) { v in
+                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 2])).foregroundStyle(Color.white.opacity(0.1))
                 AxisValueLabel {
-                    if let bytes = val.as(Double.self) {
-                        Text(NetworkMonitor.formatCompact(UInt64(max(0, bytes))))
-                            .font(.system(size: 9))
-                            .foregroundStyle(.secondary)
+                    if let b = v.as(Double.self) {
+                        Text(Fmt.bytes(b)).font(.system(size: 9)).foregroundStyle(.secondary)
                     }
                 }
             }
         }
         .chartOverlay { proxy in
             GeometryReader { geo in
-                Rectangle()
-                    .fill(Color.clear)
-                    .contentShape(Rectangle())
+                Rectangle().fill(Color.clear).contentShape(Rectangle())
                     .onContinuousHover { phase in
                         switch phase {
                         case .active(let loc):
-                            if let label: String = proxy.value(atX: loc.x),
-                               let pt = monitor.chartPoints.first(where: { $0.label == label }) {
-                                monitor.hoveredBarPoint = pt
-                            } else {
-                                let rel = max(0, min(0.999, loc.x / geo.size.width))
-                                let idx = Int(rel * CGFloat(monitor.chartPoints.count))
-                                if idx >= 0 && idx < monitor.chartPoints.count {
-                                    monitor.hoveredBarPoint = monitor.chartPoints[idx]
-                                }
+                            let x = loc.x - geo[proxy.plotAreaFrame].origin.x
+                            if let label: String = proxy.value(atX: x),
+                               let p = monitor.bars.first(where: { $0.label == label }) {
+                                monitor.hoveredBarID = p.id
                             }
                         case .ended:
-                            monitor.hoveredBarPoint = nil
+                            monitor.hoveredBarID = nil
                         }
                     }
+            }
+        }
+        .overlay {
+            if isEmpty {
+                VStack(spacing: 4) {
+                    Image(systemName: "chart.bar.xaxis").font(.system(size: 18)).foregroundStyle(.tertiary)
+                    Text("No data yet. History builds up while NetPulse runs.")
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                }
             }
         }
         .frame(height: 185)
     }
 }
 
-// MARK: - Summary Grid (Updates dynamically when hovering!)
 struct SummaryGrid: View {
     @ObservedObject var monitor: NetworkMonitor
 
+    private var metrics: (dl: String, ul: String, tot: String, peak: String) {
+        let live = monitor.selectedScope == .minute
+        let s = monitor.summary
+        let hs = live ? monitor.hoveredSample : nil
+        let hb = live ? nil : monitor.hoveredBar
+
+        if let h = hs {
+            return (Fmt.speed(h.rx), Fmt.speed(h.tx), Fmt.speed(h.total), "Inspecting")
+        } else if let b = hb {
+            return (Fmt.bytes(b.rx), Fmt.bytes(b.tx), Fmt.bytes(b.total), "Inspecting")
+        } else if live {
+            return (Fmt.speed(s.rx), Fmt.speed(s.tx), Fmt.bytes(s.total), Fmt.speed(s.peak))
+        } else {
+            return (Fmt.bytes(s.rx), Fmt.bytes(s.tx), Fmt.bytes(s.total), Fmt.bytes(s.peak))
+        }
+    }
+
     var body: some View {
-        let isHovered = monitor.hoveredBarPoint != nil || monitor.hoveredMinutePoint != nil
-
-        let downloadText: String = {
-            if let hp = monitor.hoveredMinutePoint {
-                return NetworkMonitor.formatSpeed(hp.rxSpeed)
-            } else if let bp = monitor.hoveredBarPoint {
-                return NetworkMonitor.formatBytes(UInt64(bp.rx))
-            } else {
-                return monitor.summaryDownload
-            }
-        }()
-
-        let uploadText: String = {
-            if let hp = monitor.hoveredMinutePoint {
-                return NetworkMonitor.formatSpeed(hp.txSpeed)
-            } else if let bp = monitor.hoveredBarPoint {
-                return NetworkMonitor.formatBytes(UInt64(bp.tx))
-            } else {
-                return monitor.summaryUpload
-            }
-        }()
-
-        let totalText: String = {
-            if let hp = monitor.hoveredMinutePoint {
-                return NetworkMonitor.formatSpeed(hp.totalSpeed)
-            } else if let bp = monitor.hoveredBarPoint {
-                return NetworkMonitor.formatBytes(UInt64(bp.total))
-            } else {
-                return monitor.summaryTotal
-            }
-        }()
-
-        let peakText: String = {
-            if isHovered {
-                return "Inspecting"
-            } else {
-                return monitor.summaryPeak
-            }
-        }()
+        let live = monitor.selectedScope == .minute
+        let inspecting = (live ? monitor.hoveredSample : nil) != nil || (live ? nil : monitor.hoveredBar) != nil
+        let m = metrics
 
         LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 7) {
-            SummaryCard(
-                title: monitor.selectedScope == .minute ? "Download Speed" : "Total Download",
-                value: downloadText,
-                icon: "arrow.down.circle.fill",
-                gradient: [Color.cyan, Color.blue],
-                isInspecting: isHovered
-            )
-            SummaryCard(
-                title: monitor.selectedScope == .minute ? "Upload Speed" : "Total Upload",
-                value: uploadText,
-                icon: "arrow.up.circle.fill",
-                gradient: [Color.purple, Color.pink],
-                isInspecting: isHovered
-            )
-            SummaryCard(
-                title: "Total Traffic",
-                value: totalText,
-                icon: "globe.americas.fill",
-                gradient: [Color.teal, Color.cyan],
-                isInspecting: isHovered
-            )
-            SummaryCard(
-                title: isHovered ? "Inspect Status" : "Peak Volume",
-                value: peakText,
-                icon: isHovered ? "viewfinder" : "bolt.fill",
-                gradient: isHovered ? [Color.green, Color.mint] : [Color.orange, Color.red],
-                isInspecting: isHovered
-            )
+            SummaryCard(title: live ? "Download" : "Total download", value: m.dl, icon: "arrow.down.circle.fill",
+                        gradient: [Theme.rx, .blue], inspecting: inspecting)
+            SummaryCard(title: live ? "Upload" : "Total upload", value: m.ul, icon: "arrow.up.circle.fill",
+                        gradient: [Theme.tx, .pink], inspecting: inspecting)
+            SummaryCard(title: live ? (inspecting ? "Combined" : "Last 60s") : "Total traffic", value: m.tot,
+                        icon: "globe.americas.fill", gradient: [.teal, .cyan], inspecting: inspecting)
+            SummaryCard(title: inspecting ? "Mode" : (live ? "Peak speed" : "Busiest period"), value: m.peak,
+                        icon: inspecting ? "viewfinder" : "bolt.fill",
+                        gradient: inspecting ? [.green, .mint] : [.orange, .red], inspecting: inspecting)
         }
     }
 }
@@ -1677,323 +1135,273 @@ struct SummaryCard: View {
     let value: String
     let icon: String
     let gradient: [Color]
-    var isInspecting: Bool = false
+    var inspecting = false
 
     var body: some View {
         HStack(spacing: 9) {
             ZStack {
-                Circle()
-                    .fill(gradient[0].opacity(0.18))
-                    .frame(width: 28, height: 28)
-                Image(systemName: icon)
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(
-                        LinearGradient(colors: gradient, startPoint: .top, endPoint: .bottom)
-                    )
+                Circle().fill(gradient[0].opacity(0.18)).frame(width: 28, height: 28)
+                Image(systemName: icon).font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(LinearGradient(colors: gradient, startPoint: .top, endPoint: .bottom))
             }
-
             VStack(alignment: .leading, spacing: 2) {
-                Text(title)
-                    .font(.system(size: 9.5))
-                    .foregroundStyle(.secondary)
-                Text(value)
-                    .font(.system(size: 13, weight: .bold, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(isInspecting ? gradient[0] : Color.primary)
-                    .lineLimit(1)
+                Text(title).font(.system(size: 9.5)).foregroundStyle(.secondary)
+                Text(value).font(.system(size: 13, weight: .bold, design: .rounded)).monospacedDigit()
+                    .foregroundStyle(inspecting ? gradient[0] : Color.primary).lineLimit(1).minimumScaleFactor(0.8)
             }
             Spacer()
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 7)
+        .padding(.horizontal, 9).padding(.vertical, 7)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
-        .overlay(
-            RoundedRectangle(cornerRadius: 10)
-                .strokeBorder(isInspecting ? gradient[0].opacity(0.4) : Color.white.opacity(0.08), lineWidth: 1)
-        )
+        .overlay(RoundedRectangle(cornerRadius: 10)
+            .strokeBorder(inspecting ? gradient[0].opacity(0.4) : Color.white.opacity(0.08), lineWidth: 1))
     }
 }
 
-// MARK: - Apps Tab (Real Continuous Network Activity)
+// MARK: - Apps tab
+
 struct AppsTabView: View {
     @ObservedObject var monitor: NetworkMonitor
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
-            // Apps Header & Sort Mode Picker
+        VStack(alignment: .leading, spacing: 8) {
             HStack {
-                HStack(spacing: 6) {
-                    Image(systemName: "app.badge.checkmark.fill")
-                        .foregroundStyle(.cyan)
-                    Text("Application Bandwidth")
-                        .font(.system(size: 12, weight: .bold))
+                HStack(spacing: 5) {
+                    Image(systemName: "flame.fill").foregroundStyle(.orange)
+                    Text("Top network apps").font(.system(size: 12, weight: .bold))
                 }
-
                 Spacer()
-
-                // Sort Mode Toggle: Total Today vs Live Speed
-                HStack(spacing: 2) {
-                    ForEach(AppSortMode.allCases) { mode in
-                        Button {
-                            withAnimation(.easeInOut(duration: 0.15)) {
-                                monitor.appSortMode = mode
-                            }
-                        } label: {
-                            Text(mode.rawValue)
-                                .font(.system(size: 9.5, weight: monitor.appSortMode == mode ? .bold : .regular))
-                                .padding(.horizontal, 7)
-                                .padding(.vertical, 3)
-                                .background {
-                                    if monitor.appSortMode == mode {
-                                        RoundedRectangle(cornerRadius: 5)
-                                            .fill(Color.primary.opacity(0.12))
-                                    }
-                                }
-                                .foregroundStyle(monitor.appSortMode == mode ? Color.primary : Color.secondary)
-                        }
-                        .buttonStyle(.plain)
-                    }
-                }
-                .padding(2)
-                .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 7))
+                PillBar(items: AppMode.allCases, selection: $monitor.appMode, title: { $0.rawValue }, fontSize: 10)
+                    .frame(width: 130)
             }
 
-            if monitor.topApps.isEmpty {
+            if !monitor.appsLoaded {
                 VStack(spacing: 8) {
                     ProgressView().controlSize(.small)
-                    Text("Sampling active network sockets...")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    Text("Sampling per-app traffic…").font(.caption).foregroundStyle(.secondary)
                 }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, 36)
+                .frame(maxWidth: .infinity).padding(.vertical, 32)
+            } else if monitor.topApps.isEmpty {
+                VStack(spacing: 6) {
+                    Image(systemName: "moon.zzz").font(.system(size: 20)).foregroundStyle(.tertiary)
+                    Text(monitor.appMode == .live ? "No app is using the network right now"
+                                                  : "Nothing recorded this session yet")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                .frame(maxWidth: .infinity).padding(.vertical, 32)
             } else {
-                let maxMetric: UInt64 = {
-                    if monitor.appSortMode == .liveSpeed {
-                        return monitor.topApps.map { $0.currentSpeed }.max() ?? 1
-                    } else {
-                        return monitor.topApps.first?.totalBytes ?? 1
-                    }
-                }()
-
-                ScrollView(showsIndicators: false) {
+                let maxValue = monitor.appMode == .live
+                    ? (monitor.topApps.first?.rateTotal ?? 1)
+                    : Double(monitor.topApps.first?.sessionTotal ?? 1)
+                ScrollView {
                     VStack(spacing: 7) {
-                        ForEach(Array(monitor.topApps.enumerated()), id: \.element.id) { index, app in
-                            AppUsageRow(
-                                rank: index + 1,
-                                item: app,
-                                maxMetric: max(1, maxMetric),
-                                mode: monitor.appSortMode,
-                                todayTotal: max(1, monitor.todayInternet.total)
-                            )
+                        ForEach(monitor.topApps) { app in
+                            AppUsageRow(item: app, mode: monitor.appMode, maxValue: max(maxValue, 1))
                         }
                     }
                 }
-                .frame(maxHeight: 290)
+                .scrollIndicators(.hidden)
+                .frame(maxHeight: 300)
             }
         }
         .padding(12)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
-        .overlay(
-            RoundedRectangle(cornerRadius: 14)
-                .strokeBorder(Color.white.opacity(0.08), lineWidth: 0.8)
-        )
+        .glassCard()
     }
 }
 
 struct AppUsageRow: View {
-    let rank: Int
     let item: AppUsageItem
-    let maxMetric: UInt64
-    let mode: AppSortMode
-    let todayTotal: UInt64
-
-    var ratio: Double {
-        let value = mode == .liveSpeed ? item.currentSpeed : item.totalBytes
-        guard maxMetric > 0 else { return 0 }
-        return Double(value) / Double(maxMetric)
-    }
+    let mode: AppMode
+    let maxValue: Double
 
     var body: some View {
-        VStack(spacing: 4) {
+        let rx = mode == .live ? item.rxRate : Double(item.rxSession)
+        let tx = mode == .live ? item.txRate : Double(item.txSession)
+
+        VStack(spacing: 5) {
             HStack(spacing: 8) {
-                // Rank Number
-                Text("#\(rank)")
-                    .font(.system(size: 9, weight: .bold, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-                    .frame(width: 18, alignment: .leading)
-
-                // App Icon
-                ZStack {
-                    RoundedRectangle(cornerRadius: 6)
-                        .fill(item.iconColor.opacity(0.18))
-                        .frame(width: 24, height: 24)
-                    Image(systemName: item.iconName)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(item.iconColor)
-                }
-
-                // App Name
-                Text(item.name)
-                    .font(.system(size: 11.5, weight: .semibold))
-                    .lineLimit(1)
-
-                // Live Speed Pill if transmitting
-                if item.currentSpeed > 0 {
-                    HStack(spacing: 3) {
-                        Circle().fill(Color.green).frame(width: 4, height: 4)
-                        Text("\(NetworkMonitor.formatSpeed(Double(item.currentSpeed)))")
-                            .font(.system(size: 8.5, weight: .bold, design: .monospaced))
-                            .foregroundStyle(.green)
+                Group {
+                    if let icon = item.icon {
+                        Image(nsImage: icon).resizable().frame(width: 22, height: 22)
+                    } else {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 6).fill(Color.accentColor.opacity(0.18))
+                            Image(systemName: item.symbol).font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(Color.accentColor)
+                        }
+                        .frame(width: 22, height: 22)
                     }
-                    .padding(.horizontal, 5)
-                    .padding(.vertical, 1.5)
-                    .background(Color.green.opacity(0.15), in: Capsule())
                 }
-
+                Text(item.name).font(.system(size: 12, weight: .medium)).lineLimit(1)
                 Spacer()
-
-                // Data Metrics
                 HStack(spacing: 7) {
-                    Text("↓\(NetworkMonitor.formatCompact(item.rxBytes))")
-                        .foregroundStyle(.cyan.opacity(0.85))
-                    Text("↑\(NetworkMonitor.formatCompact(item.txBytes))")
-                        .foregroundStyle(.purple.opacity(0.85))
-                    Text(NetworkMonitor.formatCompact(item.totalBytes))
-                        .fontWeight(.bold)
+                    Text("↓\(mode == .live ? Fmt.speed(rx) : Fmt.bytes(rx))").foregroundStyle(Theme.rx)
+                    Text("↑\(mode == .live ? Fmt.speed(tx) : Fmt.bytes(tx))").foregroundStyle(Theme.tx)
                 }
                 .font(.system(size: 10, design: .monospaced))
             }
 
-            // Dual Gradient Visual Progress Bar
             GeometryReader { geo in
                 let w = geo.size.width
-                let rxRatio = Double(item.rxBytes) / Double(max(1, maxMetric))
-                let txRatio = Double(item.txBytes) / Double(max(1, maxMetric))
-
                 ZStack(alignment: .leading) {
-                    Capsule()
-                        .fill(Color.primary.opacity(0.06))
-                        .frame(height: 5)
-
+                    Capsule().fill(Color.primary.opacity(0.06))
                     HStack(spacing: 1) {
-                        Capsule()
-                            .fill(LinearGradient(colors: [.cyan, .blue], startPoint: .leading, endPoint: .trailing))
-                            .frame(width: max(w * CGFloat(min(1.0, rxRatio)), 3), height: 5)
-
-                        Capsule()
-                            .fill(LinearGradient(colors: [.purple, .pink], startPoint: .leading, endPoint: .trailing))
-                            .frame(width: max(w * CGFloat(min(1.0, txRatio)), 2), height: 5)
+                        Capsule().fill(LinearGradient(colors: [.cyan, .blue], startPoint: .leading, endPoint: .trailing))
+                            .frame(width: rx > 0 ? max(3, w * CGFloat(rx / maxValue)) : 0)
+                        Capsule().fill(LinearGradient(colors: [.purple, .pink], startPoint: .leading, endPoint: .trailing))
+                            .frame(width: tx > 0 ? max(2, w * CGFloat(tx / maxValue)) : 0)
                     }
                 }
             }
             .frame(height: 5)
+            .animation(.easeOut(duration: 0.3), value: rx + tx)
         }
-        .padding(.horizontal, 9)
-        .padding(.vertical, 6)
+        .padding(.horizontal, 9).padding(.vertical, 7)
         .background(Color.white.opacity(0.03), in: RoundedRectangle(cornerRadius: 9))
     }
 }
 
-// MARK: - Overview Tab
+// MARK: - Overview tab
+
 struct OverviewTabView: View {
     @ObservedObject var monitor: NetworkMonitor
 
     var body: some View {
+        let ins = monitor.insights()
+        let capBytes = monitor.dailyCapGB * 1_000_000_000
+
         VStack(spacing: 10) {
-            // Hero Today's Card
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
-                    Label("Today's Network Usage (en0)", systemImage: "globe.americas.fill")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(.secondary)
+                    Label("Today", systemImage: "globe.americas.fill")
+                        .font(.system(size: 11, weight: .bold)).foregroundStyle(.secondary)
                     Spacer()
                     HStack(spacing: 5) {
                         Circle().fill(Color.green).frame(width: 6, height: 6)
-                        Text("Real-time")
-                            .font(.system(size: 9.5, weight: .semibold))
-                            .foregroundStyle(.green)
+                        Text("Real-time").font(.system(size: 9.5, weight: .semibold)).foregroundStyle(.green)
                     }
                 }
-
-                Text(NetworkMonitor.formatBytes(monitor.todayInternet.total))
-                    .font(.system(size: 32, weight: .heavy, design: .rounded))
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [Color.primary, Color.primary.opacity(0.85)],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-
+                Text(Fmt.bytes(monitor.todayInternet.total))
+                    .font(.system(size: 32, weight: .heavy, design: .rounded)).monospacedDigit()
                 HStack(spacing: 16) {
-                    HStack(spacing: 5) {
-                        Circle().fill(Color.cyan).frame(width: 6, height: 6)
-                        Text("Download: \(NetworkMonitor.formatBytes(monitor.todayInternet.rx))")
-                            .foregroundStyle(.secondary)
-                    }
-                    HStack(spacing: 5) {
-                        Circle().fill(Color.purple).frame(width: 6, height: 6)
-                        Text("Upload: \(NetworkMonitor.formatBytes(monitor.todayInternet.tx))")
-                            .foregroundStyle(.secondary)
+                    HStack(spacing: 5) { Circle().fill(Theme.rx).frame(width: 6, height: 6)
+                        Text("↓ \(Fmt.bytes(monitor.todayInternet.rx))") }
+                    HStack(spacing: 5) { Circle().fill(Theme.tx).frame(width: 6, height: 6)
+                        Text("↑ \(Fmt.bytes(monitor.todayInternet.tx))") }
+                }
+                .font(.system(size: 11, weight: .medium, design: .monospaced)).foregroundStyle(.secondary)
+
+                if capBytes > 0 {
+                    let frac = min(1, Double(monitor.todayInternet.total) / capBytes)
+                    VStack(alignment: .leading, spacing: 4) {
+                        GeometryReader { geo in
+                            ZStack(alignment: .leading) {
+                                Capsule().fill(Color.primary.opacity(0.08))
+                                Capsule()
+                                    .fill(LinearGradient(colors: frac > 0.9 ? [.orange, .red] : [.cyan, .blue],
+                                                         startPoint: .leading, endPoint: .trailing))
+                                    .frame(width: geo.size.width * frac)
+                            }
+                        }
+                        .frame(height: 6)
+                        Text("\(Int(frac * 100))% of \(Int(monitor.dailyCapGB)) GB daily limit")
+                            .font(.system(size: 9.5)).foregroundStyle(.secondary)
                     }
                 }
-                .font(.system(size: 11, weight: .medium, design: .monospaced))
             }
-            .padding(14)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
-            .overlay(
-                RoundedRectangle(cornerRadius: 14)
-                    .strokeBorder(Color.white.opacity(0.08), lineWidth: 0.8)
-            )
+            .padding(14).glassCard()
 
-            // VPN Card
-            VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                InsightTile(icon: ins.vsYesterday.map { $0 >= 0 ? "arrow.up.right" : "arrow.down.right" } ?? "minus",
+                            title: "vs yesterday",
+                            value: ins.vsYesterday.map { String(format: "%+.0f%%", $0) } ?? "–",
+                            tint: (ins.vsYesterday ?? 0) > 0 ? .orange : .green)
+                InsightTile(icon: "calendar", title: "7-day avg",
+                            value: ins.weekAverage > 0 ? Fmt.bytes(ins.weekAverage) : "–", tint: .blue)
+                InsightTile(icon: "clock.fill", title: "Busiest hour",
+                            value: ins.busiestHour ?? "–", tint: .purple)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
                 HStack {
-                    Label("Secure VPN Tunnel (utun)", systemImage: "lock.shield.fill")
-                        .font(.system(size: 11, weight: .bold))
-                        .foregroundStyle(.secondary)
+                    Label("VPN tunnel", systemImage: "lock.shield.fill")
+                        .font(.system(size: 11, weight: .bold)).foregroundStyle(.secondary)
                     Spacer()
-                    Text(monitor.isVPNActive ? "Protected" : "Inactive")
+                    Text(monitor.vpnActive ? "Connected" : "Not connected")
                         .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(monitor.isVPNActive ? .green : .secondary)
+                        .foregroundStyle(monitor.vpnActive ? .green : .secondary)
                 }
-
-                Text(NetworkMonitor.formatBytes(monitor.todayVPN.total))
-                    .font(.system(size: 22, weight: .bold, design: .rounded))
-
+                Text(Fmt.bytes(monitor.todayVPN.total)).font(.system(size: 20, weight: .bold, design: .rounded))
                 HStack(spacing: 16) {
-                    Text("Download: \(NetworkMonitor.formatBytes(monitor.todayVPN.rx))")
-                        .foregroundStyle(.cyan.opacity(0.8))
-                    Text("Upload: \(NetworkMonitor.formatBytes(monitor.todayVPN.tx))")
-                        .foregroundStyle(.purple.opacity(0.8))
+                    Text("↓ \(Fmt.bytes(monitor.todayVPN.rx))").foregroundStyle(Theme.rx.opacity(0.85))
+                    Text("↑ \(Fmt.bytes(monitor.todayVPN.tx))").foregroundStyle(Theme.tx.opacity(0.85))
                 }
                 .font(.system(size: 10, design: .monospaced))
             }
-            .padding(12)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
-            .overlay(
-                RoundedRectangle(cornerRadius: 14)
-                    .strokeBorder(Color.white.opacity(0.08), lineWidth: 0.8)
-            )
+            .padding(12).glassCard()
         }
     }
 }
 
-// MARK: - Footer
-struct FooterView: View {
-    @ObservedObject var monitor: NetworkMonitor
+struct InsightTile: View {
+    let icon: String
+    let title: String
+    let value: String
+    let tint: Color
 
     var body: some View {
-        HStack {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 4) {
+                Image(systemName: icon).font(.system(size: 9, weight: .bold)).foregroundStyle(tint)
+                Text(title).font(.system(size: 9.5)).foregroundStyle(.secondary)
+            }
+            Text(value).font(.system(size: 14, weight: .bold, design: .rounded)).monospacedDigit()
+                .lineLimit(1).minimumScaleFactor(0.7)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 10).padding(.vertical, 8)
+        .glassCard(radius: 10)
+    }
+}
+
+// MARK: - Footer
+
+struct FooterView: View {
+    @ObservedObject var monitor: NetworkMonitor
+    
+
+    var body: some View {
+        HStack(spacing: 10) {
             Button(role: .destructive) {
-                monitor.resetAllData()
+                if monitor.confirmReset { monitor.resetAllData(); monitor.confirmReset = false }
+                else {
+                    monitor.confirmReset = true
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) { monitor.confirmReset = false }
+                }
             } label: {
-                Label("Reset Statistics", systemImage: "arrow.counterclockwise")
+                Label(monitor.confirmReset ? "Tap again to confirm" : "Reset", systemImage: "arrow.counterclockwise")
                     .font(.system(size: 11))
             }
             .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
+            .foregroundStyle(monitor.confirmReset ? Color.red : Color.secondary)
+
+            Menu {
+                Toggle("Show speeds in bits (Mbps)", isOn: $monitor.useBits)
+                Toggle("Live speed in menu bar", isOn: $monitor.menuBarShowsSpeed)
+                Toggle("Launch at login", isOn: $monitor.launchAtLogin)
+                Picker("Daily limit", selection: $monitor.dailyCapGB) {
+                    Text("No limit").tag(0.0)
+                    Text("5 GB").tag(5.0)
+                    Text("10 GB").tag(10.0)
+                    Text("20 GB").tag(20.0)
+                    Text("50 GB").tag(50.0)
+                }
+            } label: {
+                Image(systemName: "gearshape").font(.system(size: 12))
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
 
             Spacer()
 
@@ -2001,11 +1409,8 @@ struct FooterView: View {
                 monitor.saveDatabase()
                 NSApplication.shared.terminate(nil)
             } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "power")
-                    Text("Quit")
-                }
-                .font(.system(size: 11, weight: .semibold))
+                HStack(spacing: 4) { Image(systemName: "power"); Text("Quit") }
+                    .font(.system(size: 11, weight: .semibold))
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
@@ -2013,7 +1418,8 @@ struct FooterView: View {
     }
 }
 
-// MARK: - App Main
+// MARK: - App
+
 @main
 struct NetPulseApp: App {
     @StateObject private var monitor = NetworkMonitor()
@@ -2024,7 +1430,7 @@ struct NetPulseApp: App {
         } label: {
             HStack(spacing: 4) {
                 Image(systemName: "waveform.path.ecg")
-                Text(monitor.menuBarTitle)
+                Text(monitor.menuBarTitle).monospacedDigit()
             }
         }
         .menuBarExtraStyle(.window)
