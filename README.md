@@ -9,6 +9,43 @@
 
 ---
 
+## 🚀 Easy 1-Line Installation (Recommended)
+
+Open **Terminal** and run:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/xElyanax/NetPulse/main/install.sh | bash
+```
+
+> **Why use this?**  
+> Running this command automatically downloads the latest release, places it in `/Applications`, bypasses macOS Gatekeeper quarantine, and launches the app immediately without any warnings.
+
+---
+
+## 📦 Manual Download & Installation
+
+1. Download **[NetPulse.zip](https://github.com/xElyanax/NetPulse/releases/latest/download/NetPulse.zip)**.
+2. Double-click `NetPulse.zip` to extract `NetPulse.app`.
+3. Drag `NetPulse.app` into your **Applications** folder.
+
+### ⚠️ If macOS says "NetPulse is damaged" or "cannot be opened":
+
+Because NetPulse is an open-source tool without a paid Apple Developer certificate ($99/yr), macOS Gatekeeper flags internet downloads as quarantined. To open it:
+
+- **Option A (Terminal - Fastest):**
+  ```bash
+  xattr -cr /Applications/NetPulse.app
+  ```
+  *(Then simply double-click the app to open!)*
+
+- **Option B (System Settings):**
+  1. Try to open the app once (click *Cancel* or *OK* when the alert appears).
+  2. Open **System Settings > Privacy & Security**.
+  3. Scroll down to the **Security** section where it says *"NetPulse was blocked..."*.
+  4. Click **Open Anyway** and enter your Mac password.
+
+---
+
 ## ✨ Features
 
 - **⚡ Real-Time Speed & Live Minute Chart:**
@@ -36,23 +73,6 @@
   - Built with pure SwiftUI and Swift Charts.
   - Zero heavy third-party dependencies.
   - Optimized for negligible battery impact (< 0.1% CPU idle).
-
----
-
-## 🚀 Quick Download & Install
-
-1. Download the latest **[NetPulse.zip](https://github.com/xElyanax/NetPulse/releases/latest)** from GitHub Releases.
-2. Unzip the archive to get `NetPulse.app`.
-3. Move `NetPulse.app` to your `/Applications` folder (or run it directly).
-
-> [!TIP]
-> **First Launch on macOS:**
-> Because NetPulse is an open-source project without a paid Apple Developer certificate, macOS Gatekeeper may show a security notice on first launch:
-> - **Method 1:** Right-click (or Control-click) `NetPulse.app`, select **Open**, and click **Open** in the dialog.
-> - **Method 2:** Or run this quick command in Terminal:
->   ```bash
->   xattr -cr /Applications/NetPulse.app
->   ```
 
 ---
 
