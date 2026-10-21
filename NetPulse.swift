@@ -131,7 +131,7 @@ struct AppUsageItem: Identifiable {
 }
 
 enum TimeScope: String, CaseIterable, Identifiable {
-    case minute = "Live", hourly = "Hourly", daily = "Daily", weekly = "Weekly", monthly = "Monthly"
+    case minute = "Live", hourly = "24h", daily = "14d", weekly = "8w", monthly = "6m"
     var id: String { rawValue }
 
     var title: String {
@@ -160,7 +160,7 @@ enum ChartFilter: String, CaseIterable, Identifiable {
 }
 
 enum ActiveTab: String, CaseIterable, Identifiable {
-    case charts = "Charts", apps = "Apps", overview = "Overview"
+    case charts = "Traffic", apps = "Apps", overview = "Today"
     var id: String { rawValue }
     var icon: String {
         switch self {
@@ -655,77 +655,27 @@ final class NetworkMonitor: ObservableObject {
     }
 }
 
-// MARK: - Reusable UI pieces
+// MARK: - Design system (minimal: one accent, system typography, hairlines)
 
 enum Theme {
-    static let rx = Color.cyan
-    static let tx = Color.purple
+    static let rx = Color.accentColor
+    static let tx = Color.gray
 }
 
-extension View {
-    func glassCard(radius: CGFloat = 14) -> some View {
-        self
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: radius))
-            .overlay(RoundedRectangle(cornerRadius: radius).strokeBorder(Color.white.opacity(0.08), lineWidth: 0.8))
+extension Font {
+    static func num(_ size: CGFloat, _ weight: Font.Weight = .regular) -> Font {
+        .system(size: size, weight: weight).monospacedDigit()
     }
 }
 
-struct PillBar<Item: Hashable>: View {
-    let items: [Item]
-    @Binding var selection: Item
-    let title: (Item) -> String
-    var icon: ((Item) -> String)? = nil
-    var fontSize: CGFloat = 11
-
+struct Caption: View {
+    let text: String
+    init(_ text: String) { self.text = text }
     var body: some View {
-        HStack(spacing: 3) {
-            ForEach(items, id: \.self) { item in
-                Button {
-                    withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) { selection = item }
-                } label: {
-                    HStack(spacing: 4) {
-                        if let icon = icon {
-                            Image(systemName: icon(item)).font(.system(size: fontSize - 2, weight: .semibold))
-                        }
-                        Text(title(item)).font(.system(size: fontSize, weight: .semibold))
-                    }
-                    .frame(maxWidth: .infinity)
-                    .padding(.vertical, 5)
-                    .background {
-                        if selection == item {
-                            Capsule()
-                                .fill(LinearGradient(colors: [.blue, .indigo], startPoint: .topLeading, endPoint: .bottomTrailing))
-                                .shadow(color: Color.blue.opacity(0.4), radius: 4, y: 1)
-                        }
-                    }
-                    .foregroundStyle(selection == item ? Color.white : Color.secondary)
-                    .contentShape(Capsule())
-                }
-                .buttonStyle(.plain)
-            }
-        }
-        .padding(2.5)
-        .background(.ultraThinMaterial, in: Capsule())
-        .overlay(Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 0.8))
-    }
-}
-
-struct PulsingDot: View {
-    let color: Color
-
-    var body: some View {
-        TimelineView(.periodic(from: .now, by: 0.1)) { timeline in
-            let phase = timeline.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 1.5) / 1.5
-            Circle()
-                .fill(color)
-                .frame(width: 7, height: 7)
-                .overlay(
-                    Circle()
-                        .stroke(color.opacity(max(0, 0.8 - phase * 0.8)), lineWidth: 1.2)
-                        .scaleEffect(1.0 + CGFloat(phase) * 1.6)
-                )
-                .shadow(color: color.opacity(0.8), radius: 3)
-        }
+        Text(text.uppercased())
+            .font(.system(size: 9, weight: .medium))
+            .tracking(0.7)
+            .foregroundStyle(.secondary)
     }
 }
 
@@ -735,36 +685,29 @@ struct DashboardView: View {
     @ObservedObject var monitor: NetworkMonitor
 
     var body: some View {
-        ZStack {
-            GeometryReader { geo in
-                Circle().fill(Color.blue.opacity(0.12)).frame(width: 220, height: 220)
-                    .blur(radius: 60).offset(x: -40, y: -40)
-                Circle().fill(Color.purple.opacity(0.10)).frame(width: 200, height: 200)
-                    .blur(radius: 50).offset(x: geo.size.width - 130, y: 150)
+        VStack(spacing: 14) {
+            HeaderView(monitor: monitor)
+
+            Picker("", selection: $monitor.activeTab) {
+                ForEach(ActiveTab.allCases) { Text($0.rawValue).tag($0) }
             }
-            .allowsHitTesting(false)
+            .pickerStyle(.segmented)
+            .labelsHidden()
 
-            VStack(spacing: 12) {
-                HeaderView(monitor: monitor)
-
-                PillBar(items: ActiveTab.allCases, selection: $monitor.activeTab,
-                        title: { $0.rawValue }, icon: { $0.icon }, fontSize: 12)
-
-                Group {
-                    switch monitor.activeTab {
-                    case .charts: ChartsTabView(monitor: monitor)
-                    case .apps: AppsTabView(monitor: monitor)
-                    case .overview: OverviewTabView(monitor: monitor)
-                    }
+            Group {
+                switch monitor.activeTab {
+                case .charts: ChartsTabView(monitor: monitor)
+                case .apps: AppsTabView(monitor: monitor)
+                case .overview: TodayTabView(monitor: monitor)
                 }
-
-                Divider().opacity(0.6)
-                FooterView(monitor: monitor)
             }
-            .padding(14)
+            .frame(minHeight: 285, alignment: .top)
+
+            Divider()
+            FooterView(monitor: monitor)
         }
-        .frame(width: 440)
-        .background(.ultraThinMaterial)
+        .padding(16)
+        .frame(width: 340)
         .onAppear {
             monitor.popoverVisible = true
             monitor.refreshChartData()
@@ -777,188 +720,117 @@ struct DashboardView: View {
     }
 }
 
-struct AppHeaderLogo: View {
-    private var logoImage: NSImage? {
-        if let url = Bundle.main.url(forResource: "AppLogo", withExtension: "png"),
-           let img = NSImage(contentsOf: url) {
-            return img
-        }
-        if let url = Bundle.main.url(forResource: "AppIcon", withExtension: "icns"),
-           let img = NSImage(contentsOf: url) {
-            return img
-        }
-        let devPath = "/Users/elyananasiri/NetPulseProject/assets/logo.png"
-        if FileManager.default.fileExists(atPath: devPath),
-           let img = NSImage(contentsOfFile: devPath) {
-            return img
-        }
-        return nil
-    }
-
-    var body: some View {
-        if let img = logoImage {
-            Image(nsImage: img)
-                .resizable()
-                .aspectRatio(contentMode: .fit)
-                .frame(width: 34, height: 34)
-                .clipShape(RoundedRectangle(cornerRadius: 8))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 8)
-                        .strokeBorder(Color.white.opacity(0.18), lineWidth: 0.8)
-                )
-                .shadow(color: Color.blue.opacity(0.35), radius: 4, y: 1)
-        } else {
-            ZStack {
-                RoundedRectangle(cornerRadius: 9)
-                    .fill(LinearGradient(colors: [Color.blue.opacity(0.3), Color.purple.opacity(0.2)],
-                                         startPoint: .topLeading, endPoint: .bottomTrailing))
-                    .frame(width: 34, height: 34)
-                    .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(Color.blue.opacity(0.4), lineWidth: 1))
-                Image(systemName: "waveform.path.ecg")
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundStyle(LinearGradient(colors: [.cyan, .blue], startPoint: .top, endPoint: .bottom))
-            }
-        }
-    }
-}
-
 struct HeaderView: View {
     @ObservedObject var monitor: NetworkMonitor
 
     var body: some View {
-        HStack(spacing: 10) {
-            AppHeaderLogo()
-
-            VStack(alignment: .leading, spacing: 2) {
-                HStack(spacing: 6) {
-                    Text("NetPulse").font(.system(size: 15, weight: .bold, design: .rounded))
-                    Text("PRO")
-                        .font(.system(size: 9, weight: .heavy, design: .rounded))
-                        .padding(.horizontal, 5).padding(.vertical, 1.5)
-                        .background(LinearGradient(colors: [Color.blue.opacity(0.3), Color.purple.opacity(0.3)],
-                                                   startPoint: .leading, endPoint: .trailing), in: Capsule())
-                        .overlay(Capsule().strokeBorder(Color.blue.opacity(0.5), lineWidth: 0.8))
-                }
-                Text("Live network & traffic monitor")
-                    .font(.system(size: 10)).foregroundStyle(.secondary)
+        HStack(alignment: .top, spacing: 0) {
+            readout("Download", Fmt.speed(monitor.speedRX), .primary)
+            readout("Upload", Fmt.speed(monitor.speedTX), .secondary)
+            Spacer(minLength: 0)
+            if monitor.vpnActive {
+                Text("VPN")
+                    .font(.system(size: 9, weight: .semibold))
+                    .tracking(0.7)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal, 6).padding(.vertical, 2)
+                    .overlay(RoundedRectangle(cornerRadius: 4).strokeBorder(Color.primary.opacity(0.2), lineWidth: 0.8))
             }
-
-            Spacer()
-
-            HStack(spacing: 7) {
-                PulsingDot(color: monitor.vpnActive ? .green : .cyan)
-                Text(monitor.vpnActive ? "VPN · \(monitor.vpnName ?? "tunnel")" : "Direct")
-                    .font(.system(size: 10, weight: .medium))
-            }
-            .padding(.horizontal, 10).padding(.vertical, 5)
-            .background(.regularMaterial, in: Capsule())
-            .overlay(Capsule().strokeBorder(Color.white.opacity(0.12), lineWidth: 0.8))
         }
+    }
+
+    private func readout(_ title: String, _ value: String, _ color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Caption(title)
+            Text(value)
+                .font(.num(20, .medium))
+                .foregroundStyle(color)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+        }
+        .frame(width: 125, alignment: .leading)
     }
 }
 
-// MARK: - Charts tab
+// MARK: - Traffic tab
 
 struct ChartsTabView: View {
     @ObservedObject var monitor: NetworkMonitor
 
     var body: some View {
         VStack(spacing: 10) {
-            PillBar(items: TimeScope.allCases, selection: $monitor.selectedScope,
-                    title: { $0.rawValue }, icon: { $0.icon })
-
-            HStack {
-                PillBar(items: ChartFilter.allCases, selection: $monitor.selectedFilter,
-                        title: { $0.rawValue }, fontSize: 10)
-                    .frame(width: 200)
-                Spacer()
-                HStack(spacing: 8) {
-                    Label(Fmt.speed(monitor.speedRX), systemImage: "arrow.down").foregroundStyle(Theme.rx)
-                    Label(Fmt.speed(monitor.speedTX), systemImage: "arrow.up").foregroundStyle(Theme.tx)
-                }
-                .labelStyle(CompactLabelStyle())
-                .font(.system(size: 10, weight: .semibold, design: .monospaced))
-                .padding(.horizontal, 8).padding(.vertical, 4)
-                .background(.ultraThinMaterial, in: Capsule())
-                .overlay(Capsule().strokeBorder(Color.white.opacity(0.08), lineWidth: 0.8))
+            Picker("", selection: $monitor.selectedScope) {
+                ForEach(TimeScope.allCases) { Text($0.rawValue).tag($0) }
             }
+            .pickerStyle(.segmented)
+            .labelsHidden()
 
-            SummaryGrid(monitor: monitor)
+            ChartHeaderRow(monitor: monitor)
 
-            VStack(alignment: .leading, spacing: 8) {
+            if monitor.selectedScope == .minute {
+                LiveChart(monitor: monitor)
                 HStack {
-                    HStack(spacing: 5) {
-                        Image(systemName: "chart.xyaxis.line").foregroundStyle(.blue).font(.caption)
-                        Text(monitor.selectedScope.title)
-                            .font(.system(size: 11, weight: .bold)).foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    HStack(spacing: 10) {
-                        HStack(spacing: 4) { Circle().fill(Theme.rx).frame(width: 6, height: 6)
-                            Text("Download").font(.system(size: 10)).foregroundStyle(.secondary) }
-                        HStack(spacing: 4) { Circle().fill(Theme.tx).frame(width: 6, height: 6)
-                            Text("Upload").font(.system(size: 10)).foregroundStyle(.secondary) }
-                    }
+                    Text("60s ago"); Spacer(); Text("now")
                 }
-
-                InspectionBanner(monitor: monitor)
-
-                if monitor.selectedScope == .minute {
-                    LiveChart(monitor: monitor)
-                } else {
-                    HistoricalBarChart(monitor: monitor)
-                }
+                .font(.system(size: 9)).foregroundStyle(.tertiary)
+            } else {
+                HistoricalBarChart(monitor: monitor)
             }
-            .padding(12)
-            .glassCard()
-            .shadow(color: Color.black.opacity(0.15), radius: 8, y: 3)
+
+            Divider().padding(.top, 2)
+            SummaryRow(monitor: monitor)
         }
     }
 }
 
-struct CompactLabelStyle: LabelStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        HStack(spacing: 3) {
-            configuration.icon.font(.system(size: 9, weight: .bold))
-            configuration.title
-        }
-    }
-}
-
-struct InspectionBanner: View {
+struct ChartHeaderRow: View {
     @ObservedObject var monitor: NetworkMonitor
 
-    var body: some View {
-        Group {
-            if monitor.selectedScope == .minute, let s = monitor.hoveredSample {
-                row(title: "\(max(0, Int((monitor.displaySamples.last?.time ?? s.time).timeIntervalSince(s.time).rounded())))s ago",
-                    rx: Fmt.speed(s.rx), tx: Fmt.speed(s.tx), total: Fmt.speed(s.total), tint: .blue)
-            } else if monitor.selectedScope != .minute, let b = monitor.hoveredBar {
-                row(title: b.label, rx: Fmt.bytes(b.rx), tx: Fmt.bytes(b.tx), total: Fmt.bytes(b.total), tint: .purple)
-            } else {
-                HStack(spacing: 5) {
-                    Image(systemName: "cursorarrow.motionlines").font(.system(size: 9)).foregroundStyle(.secondary)
-                    Text("Hover over the chart to inspect exact values")
-                        .font(.system(size: 10)).foregroundStyle(.tertiary)
-                    Spacer()
-                }
-                .padding(.horizontal, 4).frame(height: 22)
-            }
+    private var hover: (title: String, rx: String, tx: String)? {
+        if monitor.selectedScope == .minute, let s = monitor.hoveredSample {
+            let last = monitor.displaySamples.last?.time ?? s.time
+            let ago = max(0, Int(last.timeIntervalSince(s.time).rounded()))
+            return (ago == 0 ? "now" : "\(ago)s ago", Fmt.speed(s.rx), Fmt.speed(s.tx))
         }
+        if monitor.selectedScope != .minute, let b = monitor.hoveredBar {
+            return (b.label, Fmt.bytes(b.rx), Fmt.bytes(b.tx))
+        }
+        return nil
     }
 
-    private func row(title: String, rx: String, tx: String, total: String, tint: Color) -> some View {
-        HStack(spacing: 8) {
-            Text(title).font(.system(size: 10, weight: .bold))
-            Spacer()
-            Text("↓ \(rx)").foregroundStyle(Theme.rx)
-            Text("↑ \(tx)").foregroundStyle(Theme.tx)
-            Text("Σ \(total)").fontWeight(.bold)
+    var body: some View {
+        HStack(spacing: 12) {
+            if let h = hover {
+                Text(h.title).fontWeight(.medium)
+                Spacer()
+                Text("↓ \(h.rx)").foregroundStyle(Theme.rx)
+                Text("↑ \(h.tx)").foregroundStyle(.secondary)
+            } else {
+                Text(monitor.selectedScope.title).foregroundStyle(.secondary)
+                Spacer()
+                legend("Download", color: Theme.rx, filter: .download)
+                legend("Upload", color: Theme.tx, filter: .upload)
+            }
         }
-        .font(.system(size: 10, weight: .semibold, design: .monospaced))
-        .padding(.horizontal, 10).padding(.vertical, 5)
-        .background(tint.opacity(0.12), in: RoundedRectangle(cornerRadius: 7))
-        .overlay(RoundedRectangle(cornerRadius: 7).strokeBorder(tint.opacity(0.3), lineWidth: 0.8))
+        .font(.num(10))
+        .frame(height: 16)
+    }
+
+    private func legend(_ name: String, color: Color, filter: ChartFilter) -> some View {
+        let dimmed = monitor.selectedFilter != .all && monitor.selectedFilter != filter
+        return Button {
+            monitor.selectedFilter = (monitor.selectedFilter == filter) ? .all : filter
+        } label: {
+            HStack(spacing: 4) {
+                Circle().fill(color).frame(width: 6, height: 6)
+                Text(name)
+            }
+            .opacity(dimmed ? 0.35 : 1)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.secondary)
+        .help("Click to show only \(name.lowercased())")
     }
 }
 
@@ -980,57 +852,45 @@ struct LiveChart: View {
                     AreaMark(x: .value("Time", p.time), y: .value("Speed", p.rx),
                              series: .value("Series", "Download"), stacking: .unstacked)
                         .interpolationMethod(.monotone)
-                        .foregroundStyle(LinearGradient(colors: [Theme.rx.opacity(0.4), Color.blue.opacity(0.12), .clear],
-                                                        startPoint: .top, endPoint: .bottom))
+                        .foregroundStyle(Theme.rx.opacity(0.10))
                     LineMark(x: .value("Time", p.time), y: .value("Speed", p.rx),
                              series: .value("Series", "Download"))
                         .interpolationMethod(.monotone)
-                        .foregroundStyle(LinearGradient(colors: [Theme.rx, .blue], startPoint: .leading, endPoint: .trailing))
-                        .lineStyle(StrokeStyle(lineWidth: 2))
+                        .foregroundStyle(Theme.rx)
+                        .lineStyle(StrokeStyle(lineWidth: 1.5, lineJoin: .round))
                 }
                 if showUL {
-                    AreaMark(x: .value("Time", p.time), y: .value("Speed", p.tx),
-                             series: .value("Series", "Upload"), stacking: .unstacked)
-                        .interpolationMethod(.monotone)
-                        .foregroundStyle(LinearGradient(colors: [Theme.tx.opacity(0.35), Color.pink.opacity(0.1), .clear],
-                                                        startPoint: .top, endPoint: .bottom))
                     LineMark(x: .value("Time", p.time), y: .value("Speed", p.tx),
                              series: .value("Series", "Upload"))
                         .interpolationMethod(.monotone)
-                        .foregroundStyle(LinearGradient(colors: [Theme.tx, .pink], startPoint: .leading, endPoint: .trailing))
-                        .lineStyle(StrokeStyle(lineWidth: 1.5))
+                        .foregroundStyle(Theme.tx)
+                        .lineStyle(StrokeStyle(lineWidth: 1, lineJoin: .round))
                 }
             }
 
             if let h = monitor.hoveredSample {
                 RuleMark(x: .value("Hover", h.time))
-                    .foregroundStyle(Color.white.opacity(0.5))
-                    .lineStyle(StrokeStyle(lineWidth: 1.2, dash: [3, 3]))
+                    .foregroundStyle(Color.primary.opacity(0.25))
+                    .lineStyle(StrokeStyle(lineWidth: 1))
                 if showDL {
                     PointMark(x: .value("Hover", h.time), y: .value("Speed", h.rx))
-                        .symbolSize(40).foregroundStyle(Theme.rx)
+                        .symbolSize(26).foregroundStyle(Theme.rx)
                 }
                 if showUL {
                     PointMark(x: .value("Hover", h.time), y: .value("Speed", h.tx))
-                        .symbolSize(34).foregroundStyle(Theme.tx)
+                        .symbolSize(20).foregroundStyle(Theme.tx)
                 }
             }
         }
         .chartXScale(domain: start...end)
         .chartYScale(domain: 0...ymax)
-        .chartXAxis {
-            AxisMarks(values: .stride(by: .second, count: 15)) { _ in
-                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 2])).foregroundStyle(Color.white.opacity(0.1))
-                AxisValueLabel(format: Date.FormatStyle.dateTime.hour().minute().second())
-                    .font(.system(size: 9))
-            }
-        }
+        .chartXAxis(.hidden)
         .chartYAxis {
-            AxisMarks(values: .automatic(desiredCount: 4)) { v in
-                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 2])).foregroundStyle(Color.white.opacity(0.1))
+            AxisMarks(values: .automatic(desiredCount: 3)) { v in
+                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5)).foregroundStyle(Color.primary.opacity(0.08))
                 AxisValueLabel {
                     if let b = v.as(Double.self) {
-                        Text(Fmt.speed(b)).font(.system(size: 9)).foregroundStyle(.secondary)
+                        Text(Fmt.speed(b)).font(.system(size: 9)).foregroundStyle(.tertiary)
                     }
                 }
             }
@@ -1049,7 +909,7 @@ struct LiveChart: View {
                     }
             }
         }
-        .frame(height: 185)
+        .frame(height: 140)
     }
 }
 
@@ -1069,30 +929,29 @@ struct HistoricalBarChart: View {
                     BarMark(x: .value("Time", p.label), y: .value("Bytes", p.rx))
                         .foregroundStyle(by: .value("Type", "Download"))
                         .opacity(dim ? 0.35 : 1)
-                        .cornerRadius(3)
+                        .cornerRadius(2)
                 }
                 if monitor.selectedFilter != .download {
                     BarMark(x: .value("Time", p.label), y: .value("Bytes", p.tx))
                         .foregroundStyle(by: .value("Type", "Upload"))
                         .opacity(dim ? 0.35 : 1)
-                        .cornerRadius(3)
+                        .cornerRadius(2)
                 }
             }
         }
-        .chartForegroundStyleScale(["Download": Theme.rx, "Upload": Theme.tx])
+        .chartForegroundStyleScale(["Download": Theme.rx, "Upload": Theme.tx.opacity(0.55)])
         .chartLegend(.hidden)
         .chartXAxis {
             AxisMarks(values: tickLabels) { _ in
-                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 2])).foregroundStyle(Color.white.opacity(0.1))
-                AxisValueLabel().font(.system(size: 9))
+                AxisValueLabel().font(.system(size: 9)).foregroundStyle(.tertiary)
             }
         }
         .chartYAxis {
-            AxisMarks(values: .automatic(desiredCount: 4)) { v in
-                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5, dash: [2, 2])).foregroundStyle(Color.white.opacity(0.1))
+            AxisMarks(values: .automatic(desiredCount: 3)) { v in
+                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.5)).foregroundStyle(Color.primary.opacity(0.08))
                 AxisValueLabel {
                     if let b = v.as(Double.self) {
-                        Text(Fmt.bytes(b)).font(.system(size: 9)).foregroundStyle(.secondary)
+                        Text(Fmt.bytes(b)).font(.system(size: 9)).foregroundStyle(.tertiary)
                     }
                 }
             }
@@ -1116,81 +975,35 @@ struct HistoricalBarChart: View {
         }
         .overlay {
             if isEmpty {
-                VStack(spacing: 4) {
-                    Image(systemName: "chart.bar.xaxis").font(.system(size: 18)).foregroundStyle(.tertiary)
-                    Text("No data yet. History builds up while NetPulse runs.")
-                        .font(.system(size: 10)).foregroundStyle(.secondary)
-                }
+                Text("No data yet. History builds up while NetPulse runs.")
+                    .font(.system(size: 10)).foregroundStyle(.secondary)
             }
         }
-        .frame(height: 185)
+        .frame(height: 140)
     }
 }
 
-struct SummaryGrid: View {
+struct SummaryRow: View {
     @ObservedObject var monitor: NetworkMonitor
 
-    private var metrics: (dl: String, ul: String, tot: String, peak: String) {
+    var body: some View {
         let live = monitor.selectedScope == .minute
         let s = monitor.summary
-        let hs = live ? monitor.hoveredSample : nil
-        let hb = live ? nil : monitor.hoveredBar
 
-        if let h = hs {
-            return (Fmt.speed(h.rx), Fmt.speed(h.tx), Fmt.speed(h.total), "Inspecting")
-        } else if let b = hb {
-            return (Fmt.bytes(b.rx), Fmt.bytes(b.tx), Fmt.bytes(b.total), "Inspecting")
-        } else if live {
-            return (Fmt.speed(s.rx), Fmt.speed(s.tx), Fmt.bytes(s.total), Fmt.speed(s.peak))
-        } else {
-            return (Fmt.bytes(s.rx), Fmt.bytes(s.tx), Fmt.bytes(s.total), Fmt.bytes(s.peak))
+        HStack(alignment: .top, spacing: 0) {
+            stat("Download", live ? Fmt.speed(s.rx) : Fmt.bytes(s.rx))
+            stat("Upload", live ? Fmt.speed(s.tx) : Fmt.bytes(s.tx))
+            stat(live ? "Last 60s" : "Total", Fmt.bytes(s.total))
+            stat("Peak", live ? Fmt.speed(s.peak) : Fmt.bytes(s.peak))
         }
     }
 
-    var body: some View {
-        let live = monitor.selectedScope == .minute
-        let inspecting = (live ? monitor.hoveredSample : nil) != nil || (live ? nil : monitor.hoveredBar) != nil
-        let m = metrics
-
-        LazyVGrid(columns: [GridItem(.flexible()), GridItem(.flexible())], spacing: 7) {
-            SummaryCard(title: live ? "Download" : "Total download", value: m.dl, icon: "arrow.down.circle.fill",
-                        gradient: [Theme.rx, .blue], inspecting: inspecting)
-            SummaryCard(title: live ? "Upload" : "Total upload", value: m.ul, icon: "arrow.up.circle.fill",
-                        gradient: [Theme.tx, .pink], inspecting: inspecting)
-            SummaryCard(title: live ? (inspecting ? "Combined" : "Last 60s") : "Total traffic", value: m.tot,
-                        icon: "globe.americas.fill", gradient: [.teal, .cyan], inspecting: inspecting)
-            SummaryCard(title: inspecting ? "Mode" : (live ? "Peak speed" : "Busiest period"), value: m.peak,
-                        icon: inspecting ? "viewfinder" : "bolt.fill",
-                        gradient: inspecting ? [.green, .mint] : [.orange, .red], inspecting: inspecting)
+    private func stat(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Caption(title)
+            Text(value).font(.num(12, .medium)).lineLimit(1).minimumScaleFactor(0.75)
         }
-    }
-}
-
-struct SummaryCard: View {
-    let title: String
-    let value: String
-    let icon: String
-    let gradient: [Color]
-    var inspecting = false
-
-    var body: some View {
-        HStack(spacing: 9) {
-            ZStack {
-                Circle().fill(gradient[0].opacity(0.18)).frame(width: 28, height: 28)
-                Image(systemName: icon).font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(LinearGradient(colors: gradient, startPoint: .top, endPoint: .bottom))
-            }
-            VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.system(size: 9.5)).foregroundStyle(.secondary)
-                Text(value).font(.system(size: 13, weight: .bold, design: .rounded)).monospacedDigit()
-                    .foregroundStyle(inspecting ? gradient[0] : Color.primary).lineLimit(1).minimumScaleFactor(0.8)
-            }
-            Spacer()
-        }
-        .padding(.horizontal, 9).padding(.vertical, 7)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10)
-            .strokeBorder(inspecting ? gradient[0].opacity(0.4) : Color.white.opacity(0.08), lineWidth: 1))
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -1202,201 +1015,132 @@ struct AppsTabView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                HStack(spacing: 5) {
-                    Image(systemName: "flame.fill").foregroundStyle(.orange)
-                    Text("Top network apps").font(.system(size: 12, weight: .bold))
-                }
+                Caption("Top apps")
                 Spacer()
-                PillBar(items: AppMode.allCases, selection: $monitor.appMode, title: { $0.rawValue }, fontSize: 10)
-                    .frame(width: 130)
+                Picker("", selection: $monitor.appMode) {
+                    ForEach(AppMode.allCases) { Text($0.rawValue).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .labelsHidden()
+                .frame(width: 120)
             }
 
             if !monitor.appsLoaded {
-                VStack(spacing: 8) {
-                    ProgressView().controlSize(.small)
-                    Text("Sampling per-app traffic…").font(.caption).foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity).padding(.vertical, 32)
+                placeholder("Sampling…")
             } else if monitor.topApps.isEmpty {
-                VStack(spacing: 6) {
-                    Image(systemName: "moon.zzz").font(.system(size: 20)).foregroundStyle(.tertiary)
-                    Text(monitor.appMode == .live ? "No app is using the network right now"
-                                                  : "Nothing recorded this session yet")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                .frame(maxWidth: .infinity).padding(.vertical, 32)
+                placeholder(monitor.appMode == .live ? "No app is using the network right now"
+                                                     : "Nothing recorded this session yet")
             } else {
-                let maxValue = monitor.appMode == .live
-                    ? (monitor.topApps.first?.rateTotal ?? 1)
-                    : Double(monitor.topApps.first?.sessionTotal ?? 1)
                 ScrollView {
-                    VStack(spacing: 7) {
+                    VStack(spacing: 0) {
                         ForEach(monitor.topApps) { app in
-                            AppUsageRow(item: app, mode: monitor.appMode, maxValue: max(maxValue, 1))
+                            AppRow(item: app, mode: monitor.appMode)
+                            if app.id != monitor.topApps.last?.id { Divider() }
                         }
                     }
                 }
                 .scrollIndicators(.hidden)
-                .frame(maxHeight: 300)
+                .frame(maxHeight: 270)
             }
         }
-        .padding(12)
-        .glassCard()
+    }
+
+    private func placeholder(_ text: String) -> some View {
+        Text(text).font(.system(size: 11)).foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, minHeight: 200)
     }
 }
 
-struct AppUsageRow: View {
+struct AppRow: View {
     let item: AppUsageItem
     let mode: AppMode
-    let maxValue: Double
 
     var body: some View {
-        let rx = mode == .live ? item.rxRate : Double(item.rxSession)
-        let tx = mode == .live ? item.txRate : Double(item.txSession)
+        let live = mode == .live
+        let rx = live ? Fmt.speed(item.rxRate) : Fmt.bytes(item.rxSession)
+        let tx = live ? Fmt.speed(item.txRate) : Fmt.bytes(item.txSession)
+        let total = live ? Fmt.speed(item.rateTotal) : Fmt.bytes(item.sessionTotal)
 
-        VStack(spacing: 5) {
-            HStack(spacing: 8) {
-                Group {
-                    if let icon = item.icon {
-                        Image(nsImage: icon).resizable().frame(width: 22, height: 22)
-                    } else {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 6).fill(Color.accentColor.opacity(0.18))
-                            Image(systemName: item.symbol).font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(Color.accentColor)
-                        }
-                        .frame(width: 22, height: 22)
-                    }
-                }
-                Text(item.name).font(.system(size: 12, weight: .medium)).lineLimit(1)
-                Spacer()
-                HStack(spacing: 7) {
-                    Text("↓\(mode == .live ? Fmt.speed(rx) : Fmt.bytes(rx))").foregroundStyle(Theme.rx)
-                    Text("↑\(mode == .live ? Fmt.speed(tx) : Fmt.bytes(tx))").foregroundStyle(Theme.tx)
-                }
-                .font(.system(size: 10, design: .monospaced))
-            }
-
-            GeometryReader { geo in
-                let w = geo.size.width
-                ZStack(alignment: .leading) {
-                    Capsule().fill(Color.primary.opacity(0.06))
-                    HStack(spacing: 1) {
-                        Capsule().fill(LinearGradient(colors: [.cyan, .blue], startPoint: .leading, endPoint: .trailing))
-                            .frame(width: rx > 0 ? max(3, w * CGFloat(rx / maxValue)) : 0)
-                        Capsule().fill(LinearGradient(colors: [.purple, .pink], startPoint: .leading, endPoint: .trailing))
-                            .frame(width: tx > 0 ? max(2, w * CGFloat(tx / maxValue)) : 0)
-                    }
+        HStack(spacing: 10) {
+            Group {
+                if let icon = item.icon {
+                    Image(nsImage: icon).resizable()
+                } else {
+                    Image(systemName: item.symbol)
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
                 }
             }
-            .frame(height: 5)
-            .animation(.easeOut(duration: 0.3), value: rx + tx)
+            .frame(width: 18, height: 18)
+
+            VStack(alignment: .leading, spacing: 1) {
+                Text(item.name).font(.system(size: 12)).lineLimit(1)
+                Text("↓ \(rx)   ↑ \(tx)").font(.num(10)).foregroundStyle(.secondary)
+            }
+            Spacer()
+            Text(total).font(.num(12, .medium))
         }
-        .padding(.horizontal, 9).padding(.vertical, 7)
-        .background(Color.white.opacity(0.03), in: RoundedRectangle(cornerRadius: 9))
+        .padding(.vertical, 7)
     }
 }
 
-// MARK: - Overview tab
+// MARK: - Today tab
 
-struct OverviewTabView: View {
+struct TodayTabView: View {
     @ObservedObject var monitor: NetworkMonitor
 
     var body: some View {
         let ins = monitor.insights()
         let capBytes = monitor.dailyCapGB * 1_000_000_000
 
-        VStack(spacing: 10) {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    Label("Today", systemImage: "globe.americas.fill")
-                        .font(.system(size: 11, weight: .bold)).foregroundStyle(.secondary)
-                    Spacer()
-                    HStack(spacing: 5) {
-                        Circle().fill(Color.green).frame(width: 6, height: 6)
-                        Text("Real-time").font(.system(size: 9.5, weight: .semibold)).foregroundStyle(.green)
-                    }
-                }
-                Text(Fmt.bytes(monitor.todayInternet.total))
-                    .font(.system(size: 32, weight: .heavy, design: .rounded)).monospacedDigit()
-                HStack(spacing: 16) {
-                    HStack(spacing: 5) { Circle().fill(Theme.rx).frame(width: 6, height: 6)
-                        Text("↓ \(Fmt.bytes(monitor.todayInternet.rx))") }
-                    HStack(spacing: 5) { Circle().fill(Theme.tx).frame(width: 6, height: 6)
-                        Text("↑ \(Fmt.bytes(monitor.todayInternet.tx))") }
-                }
-                .font(.system(size: 11, weight: .medium, design: .monospaced)).foregroundStyle(.secondary)
-
-                if capBytes > 0 {
-                    let frac = min(1, Double(monitor.todayInternet.total) / capBytes)
-                    VStack(alignment: .leading, spacing: 4) {
-                        GeometryReader { geo in
-                            ZStack(alignment: .leading) {
-                                Capsule().fill(Color.primary.opacity(0.08))
-                                Capsule()
-                                    .fill(LinearGradient(colors: frac > 0.9 ? [.orange, .red] : [.cyan, .blue],
-                                                         startPoint: .leading, endPoint: .trailing))
-                                    .frame(width: geo.size.width * frac)
-                            }
-                        }
-                        .frame(height: 6)
-                        Text("\(Int(frac * 100))% of \(Int(monitor.dailyCapGB)) GB daily limit")
-                            .font(.system(size: 9.5)).foregroundStyle(.secondary)
-                    }
-                }
-            }
-            .padding(14).glassCard()
-
-            HStack(spacing: 8) {
-                InsightTile(icon: ins.vsYesterday.map { $0 >= 0 ? "arrow.up.right" : "arrow.down.right" } ?? "minus",
-                            title: "vs yesterday",
-                            value: ins.vsYesterday.map { String(format: "%+.0f%%", $0) } ?? "–",
-                            tint: (ins.vsYesterday ?? 0) > 0 ? .orange : .green)
-                InsightTile(icon: "calendar", title: "7-day avg",
-                            value: ins.weekAverage > 0 ? Fmt.bytes(ins.weekAverage) : "–", tint: .blue)
-                InsightTile(icon: "clock.fill", title: "Busiest hour",
-                            value: ins.busiestHour ?? "–", tint: .purple)
-            }
-
+        VStack(alignment: .leading, spacing: 14) {
             VStack(alignment: .leading, spacing: 6) {
-                HStack {
-                    Label("VPN tunnel", systemImage: "lock.shield.fill")
-                        .font(.system(size: 11, weight: .bold)).foregroundStyle(.secondary)
-                    Spacer()
-                    Text(monitor.vpnActive ? "Connected" : "Not connected")
-                        .font(.system(size: 10, weight: .bold))
-                        .foregroundStyle(monitor.vpnActive ? .green : .secondary)
+                Caption("Today")
+                Text(Fmt.bytes(monitor.todayInternet.total))
+                    .font(.system(size: 34, weight: .light)).monospacedDigit()
+                HStack(spacing: 14) {
+                    Text("↓ \(Fmt.bytes(monitor.todayInternet.rx))").foregroundStyle(Theme.rx)
+                    Text("↑ \(Fmt.bytes(monitor.todayInternet.tx))").foregroundStyle(.secondary)
                 }
-                Text(Fmt.bytes(monitor.todayVPN.total)).font(.system(size: 20, weight: .bold, design: .rounded))
-                HStack(spacing: 16) {
-                    Text("↓ \(Fmt.bytes(monitor.todayVPN.rx))").foregroundStyle(Theme.rx.opacity(0.85))
-                    Text("↑ \(Fmt.bytes(monitor.todayVPN.tx))").foregroundStyle(Theme.tx.opacity(0.85))
-                }
-                .font(.system(size: 10, design: .monospaced))
+                .font(.num(11))
             }
-            .padding(12).glassCard()
+
+            if capBytes > 0 {
+                let frac = Double(monitor.todayInternet.total) / capBytes
+                VStack(alignment: .leading, spacing: 5) {
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            Capsule().fill(Color.primary.opacity(0.08))
+                            Capsule().fill(frac >= 1 ? Color.red : Theme.rx)
+                                .frame(width: geo.size.width * min(1, frac))
+                        }
+                    }
+                    .frame(height: 3)
+                    Text("\(Int(frac * 100))% of \(Int(monitor.dailyCapGB)) GB daily limit")
+                        .font(.system(size: 10)).foregroundStyle(.secondary)
+                }
+            }
+
+            VStack(spacing: 0) {
+                Divider()
+                row("vs yesterday", ins.vsYesterday.map { String(format: "%+.0f%%", $0) } ?? "–")
+                Divider()
+                row("7-day average", ins.weekAverage > 0 ? Fmt.bytes(ins.weekAverage) : "–")
+                Divider()
+                row("Busiest hour", ins.busiestHour.map { "\($0) · \(Fmt.bytes(ins.busiestBytes))" } ?? "–")
+                Divider()
+                row("VPN", monitor.vpnActive ? "On · \(Fmt.bytes(monitor.todayVPN.total))" : "Off")
+            }
         }
     }
-}
 
-struct InsightTile: View {
-    let icon: String
-    let title: String
-    let value: String
-    let tint: Color
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 4) {
-                Image(systemName: icon).font(.system(size: 9, weight: .bold)).foregroundStyle(tint)
-                Text(title).font(.system(size: 9.5)).foregroundStyle(.secondary)
-            }
-            Text(value).font(.system(size: 14, weight: .bold, design: .rounded)).monospacedDigit()
-                .lineLimit(1).minimumScaleFactor(0.7)
+    private func row(_ label: String, _ value: String) -> some View {
+        HStack {
+            Text(label).foregroundStyle(.secondary)
+            Spacer()
+            Text(value).font(.num(12, .medium))
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(.horizontal, 10).padding(.vertical, 8)
-        .glassCard(radius: 10)
+        .font(.system(size: 12))
+        .padding(.vertical, 8)
     }
 }
 
@@ -1404,25 +1148,27 @@ struct InsightTile: View {
 
 struct FooterView: View {
     @ObservedObject var monitor: NetworkMonitor
-    
 
     var body: some View {
-        HStack(spacing: 10) {
-            Button(role: .destructive) {
+        HStack(spacing: 14) {
+            Button {
                 if monitor.confirmReset { monitor.resetAllData(); monitor.confirmReset = false }
                 else {
                     monitor.confirmReset = true
-                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) { monitor.confirmReset = false }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+                        monitor.confirmReset = false
+                    }
                 }
             } label: {
-                Label(monitor.confirmReset ? "Tap again to confirm" : "Reset", systemImage: "arrow.counterclockwise")
-                    .font(.system(size: 11))
+                Text(monitor.confirmReset ? "Tap again to confirm" : "Reset")
             }
             .buttonStyle(.plain)
             .foregroundStyle(monitor.confirmReset ? Color.red : Color.secondary)
 
+            Spacer()
+
             Menu {
-                Toggle("Show speeds in bits (Mbps)", isOn: $monitor.useBits)
+                Toggle("Show speeds in bits", isOn: $monitor.useBits)
                 Toggle("Live speed in menu bar", isOn: $monitor.menuBarShowsSpeed)
                 Toggle("Launch at login", isOn: $monitor.launchAtLogin)
                 Picker("Daily limit", selection: $monitor.dailyCapGB) {
@@ -1433,24 +1179,21 @@ struct FooterView: View {
                     Text("50 GB").tag(50.0)
                 }
             } label: {
-                Image(systemName: "gearshape").font(.system(size: 12))
+                Image(systemName: "gearshape")
             }
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
+            .foregroundStyle(.secondary)
 
-            Spacer()
-
-            Button {
+            Button("Quit") {
                 monitor.saveDatabase()
                 NSApplication.shared.terminate(nil)
-            } label: {
-                HStack(spacing: 4) { Image(systemName: "power"); Text("Quit") }
-                    .font(.system(size: 11, weight: .semibold))
             }
-            .buttonStyle(.bordered)
-            .controlSize(.small)
+            .buttonStyle(.plain)
+            .foregroundStyle(.secondary)
         }
+        .font(.system(size: 11))
     }
 }
 
@@ -1464,10 +1207,7 @@ struct NetPulseApp: App {
         MenuBarExtra {
             DashboardView(monitor: monitor)
         } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "waveform.path.ecg")
-                Text(monitor.menuBarTitle).monospacedDigit()
-            }
+            Text(monitor.menuBarTitle).monospacedDigit()
         }
         .menuBarExtraStyle(.window)
     }
